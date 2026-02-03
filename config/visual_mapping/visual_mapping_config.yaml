@@ -1,0 +1,62 @@
+%YAML:1.0
+
+# Visual Sparse Mapping Configuration File
+# This file contains all parameters for the visual odometry system
+
+# =============================================================================
+# Camera Calibration (cam0)
+# =============================================================================
+# Camera intrinsics and distortion parameters
+# Format follows Kalibr calibration convention
+
+cam0:
+  camera_model: pinhole
+  distortion_model: radtan
+  intrinsics: [500.0, 500.0, 320.0, 240.0]  # [fx, fy, cx, cy]
+  distortion_coeffs: [0.0, 0.0, 0.0, 0.0, 0.0]  # [k1, k2, p1, p2, k3]
+  resolution: [640, 480]  # [width, height]
+
+# =============================================================================
+# Feature Tracking Parameters
+# =============================================================================
+# Parameters for KLT feature tracker
+
+feature_tracking:
+  num_features: 500        # Maximum number of features to track
+  fast_threshold: 10       # FAST corner detector threshold (lower = more features)
+  grid_x: 5                # Grid cells in x direction for feature distribution
+  grid_y: 4                # Grid cells in y direction for feature distribution
+  min_px_dist: 20          # Minimum pixel distance between features
+
+# =============================================================================
+# Keyframe Selection Parameters
+# =============================================================================
+# Parameters for determining when to create new keyframes
+
+keyframe:
+  min_translation: 0.1     # Minimum translation (meters) to trigger new keyframe
+  min_rotation: 5.0        # Minimum rotation (degrees) to trigger new keyframe
+  min_tracked_features: 50 # Force keyframe if tracked features drop below this
+  min_frames_between: 5    # Minimum frames between keyframes
+
+# =============================================================================
+# Triangulation Parameters
+# =============================================================================
+# Parameters for 3D point triangulation
+
+triangulation:
+  max_reproj_error: 2.0    # Maximum reprojection error (pixels) for valid points
+  min_depth: 0.1           # Minimum depth (meters) for valid points
+  max_depth: 100.0         # Maximum depth (meters) for valid points
+
+# =============================================================================
+# Visualization Parameters
+# =============================================================================
+# Parameters for Pangolin 3D viewer
+
+viewer:
+  window_width: 1024       # Viewer window width (pixels)
+  window_height: 768       # Viewer window height (pixels)
+  window_name: "Visual Sparse Mapping"
+  point_size: 2.0          # Size of rendered 3D points
+  camera_size: 0.1         # Size of camera frustum visualization

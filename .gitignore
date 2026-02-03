@@ -1,0 +1,65 @@
+# Basics
+*.db
+*.log
+*.DS_Store
+
+# Build directories (C++/CMake)
+build/
+build_*/
+bin/
+lib/
+devel/
+install/
+out/
+Release/
+Debug/
+x64/
+*.exe
+*.dll
+*.lib
+*.pdb
+*.ilk
+*.exp
+
+# Visual Studio
+.vs/
+*.sln
+*.vcxproj
+*.vcxproj.user
+*.vcxproj.filters
+*.tlog
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+*.cmake
+
+# VS Code
+.vscode/
+
+# Ros
+rosdoc.yaml
+*.launch
+
+# Unity 3D
+_Unity/[Ll]ibrary/
+_Unity/[Tt]emp/
+_Unity/[Oo]bj/
+_Unity/[Bb]uild/
+_Unity/[Bb]uilds/
+_Unity/[Ll]ogs/
+_Unity/[Mm]emoryCaptures/
+_Unity/[Uu]serSettings/
+_Unity/*.csproj
+_Unity/*.unityproj
+_Unity/*.sln
+_Unity/*.suo
+_Unity/*.tmp
+_Unity/*.user
+_Unity/*.userprefs
+_Unity/*.pidb
+_Unity/*.booproj
+_Unity/*.svd
+_Unity/*.pdb
+_Unity/*.opendb
+_Unity/*.VC.db
+/_Unity/sqrtVINS/Library
