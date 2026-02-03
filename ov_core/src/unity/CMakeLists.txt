@@ -16,7 +16,8 @@ message(STATUS "Building vo_unity for Android ${ANDROID_ABI}")
 # Find dependencies
 find_package(Eigen3 REQUIRED)
 find_package(OpenCV REQUIRED)
-find_package(Boost REQUIRED COMPONENTS system filesystem)
+# Boost is header-only, manually specify path
+set(BOOST_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../../../Thirdparty/boost_1_84_0")
 
 # Include directories
 include_directories(
@@ -24,19 +25,28 @@ include_directories(
     ${CMAKE_CURRENT_SOURCE_DIR}/../..
     ${EIGEN3_INCLUDE_DIR}
     ${OpenCV_INCLUDE_DIRS}
-    ${Boost_INCLUDE_DIRS}
+    ${BOOST_ROOT}
 )
 
 # ============================================================================
 # Collect ov_core sources (excluding test files)
 # ============================================================================
+set(OV_CORE_SRC_DIR "${CMAKE_CURRENT_SOURCE_DIR}/..")
+
 file(GLOB_RECURSE OVCORE_SOURCES
-    "${CMAKE_CURRENT_SOURCE_DIR}/../*.cpp"
+    "${OV_CORE_SRC_DIR}/cam/*.cpp"
+    "${OV_CORE_SRC_DIR}/cpi/*.cpp"
+    "${OV_CORE_SRC_DIR}/feat/*.cpp"
+    "${OV_CORE_SRC_DIR}/init/*.cpp"
+    "${OV_CORE_SRC_DIR}/sim/*.cpp"
+    "${OV_CORE_SRC_DIR}/track/*.cpp"
+    "${OV_CORE_SRC_DIR}/types/*.cpp"
+    "${OV_CORE_SRC_DIR}/utils/*.cpp"
+    "${OV_CORE_SRC_DIR}/visual_odometry/*.cpp"
 )
 
-# Exclude test files and Unity files (we'll add Unity files separately)
+# Exclude test files
 list(FILTER OVCORE_SOURCES EXCLUDE REGEX ".*test_.*\\.cpp$")
-list(FILTER OVCORE_SOURCES EXCLUDE REGEX ".*/unity/.*\\.cpp$")
 
 # Unity bridge sources
 set(UNITY_SOURCES
@@ -64,8 +74,6 @@ target_compile_options(vo_unity PRIVATE
     -fPIC
     -fvisibility=hidden
     -fvisibility-inlines-hidden
-    -fno-exceptions
-    -fno-rtti
 )
 
 # Use c++_shared STL
@@ -82,7 +90,6 @@ set_target_properties(vo_unity PROPERTIES
 # Link libraries
 target_link_libraries(vo_unity PRIVATE
     ${OpenCV_LIBRARIES}
-    ${Boost_LIBRARIES}
     log  # Android log library
 )
 
