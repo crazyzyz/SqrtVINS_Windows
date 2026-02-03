@@ -38,7 +38,6 @@ cmake ../ov_srvins -G "Visual Studio 17 2022" -A x64 -DCMAKE_TOOLCHAIN_FILE="C:/
 ```powershell
 cmake --build . --target clean
 
-
 cmake --build . --config Release -j 8 
 ```
 
