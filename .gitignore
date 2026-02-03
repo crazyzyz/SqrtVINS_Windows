@@ -40,6 +40,9 @@ cmake_install.cmake
 rosdoc.yaml
 *.launch
 
+# Thirdparty dependencies (large files)
+Thirdparty/
+
 # Unity 3D
 _Unity/[Ll]ibrary/
 _Unity/[Tt]emp/
