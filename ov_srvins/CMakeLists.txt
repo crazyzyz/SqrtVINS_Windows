@@ -141,21 +141,7 @@ install(TARGETS run_simulation
         RUNTIME DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
 )
 
-add_executable(test_sim_meas src/test_sim_meas.cpp)
-target_link_libraries(test_sim_meas ov_srvins_lib ${thirdparty_libraries})
-install(TARGETS test_sim_meas
-        ARCHIVE DESTINATION ${CATKIN_PACKAGE_LIB_DESTINATION}
-        LIBRARY DESTINATION ${CATKIN_PACKAGE_LIB_DESTINATION}
-        RUNTIME DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
-)
 
-add_executable(test_sim_repeat src/test_sim_repeat.cpp)
-target_link_libraries(test_sim_repeat ov_srvins_lib ${thirdparty_libraries})
-install(TARGETS test_sim_repeat
-        ARCHIVE DESTINATION ${CATKIN_PACKAGE_LIB_DESTINATION}
-        LIBRARY DESTINATION ${CATKIN_PACKAGE_LIB_DESTINATION}
-        RUNTIME DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
-)
 
 add_executable(test_webcam ${CMAKE_SOURCE_DIR}/../ov_core/src/test_webcam.cpp)
 target_link_libraries(test_webcam ov_srvins_lib ${thirdparty_libraries})

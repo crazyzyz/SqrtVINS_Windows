@@ -36,7 +36,10 @@ cmake ../ov_srvins -G "Visual Studio 17 2022" -A x64 -DCMAKE_TOOLCHAIN_FILE="C:/
 ### 3. 编译
 
 ```powershell
-cmake --build . --config Release
+cmake --build . --target clean
+
+
+cmake --build . --config Release -j 8 
 ```
 
 ## 运行
