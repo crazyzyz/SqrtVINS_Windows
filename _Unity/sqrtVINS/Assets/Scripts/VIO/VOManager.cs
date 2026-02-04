@@ -16,7 +16,6 @@ namespace SqrtVINS
     /// </summary>
     public class VOManager : MonoBehaviour
     {
-        #region 单例模式
 
         private static VOManager _instance;
         public static VOManager Instance
@@ -31,10 +30,6 @@ namespace SqrtVINS
             }
         }
 
-        #endregion
-
-        #region 配置参数
-
         [Header("相机参数")]
         [SerializeField] private float focalLength = 500f;
         [SerializeField] private int imageWidth = 640;
@@ -44,13 +39,9 @@ namespace SqrtVINS
         [SerializeField] private int maxFeatures = 200;
         [SerializeField] private int pyramidLevels = 3;
 
-        [Header("更新设置")]
-        [SerializeField] private bool autoUpdate = true;
-        [SerializeField] private float updateInterval = 0.033f; // 约 30 FPS
-
-        #endregion
-
-        #region 状态与数据
+        // 目前不使用定时更新，由相机驱动
+        // [SerializeField] private bool autoUpdate = true;
+        // [SerializeField] private float updateInterval = 0.033f; 
 
         public enum VOState
         {
@@ -82,17 +73,13 @@ namespace SqrtVINS
 
         public bool IsTracking => _currentState == VOState.Running && _currentPose.valid != 0;
 
-        #endregion
-
-        #region 线程与队列
-
         private Thread _workerThread;
         private AutoResetEvent _workerSignal;
-        private volatile bool _shouldStopWorker;
+        private CancellationTokenSource _cancellationTokenSource;
         private ConcurrentQueue<FrameData> _frameQueue;
         private ConcurrentQueue<byte[]> _bufferPool;
         
-        private const int MAX_QUEUE_SIZE = 5; // 如果堆积超过5帧，说明处理不过来
+        private const int MAX_QUEUE_SIZE = 5; 
 
         private struct FrameData
         {
@@ -103,19 +90,10 @@ namespace SqrtVINS
             public double Timestamp;
         }
 
-        #endregion
-
-        #region 事件
-
-        [Header("事件")]
+        [Header("Events")]
         public UnityEvent<Pose> OnPoseUpdated;
-        public UnityEvent<VOState> OnStateChanged;
         public UnityEvent OnTrackingLost;
         public UnityEvent OnTrackingRecovered;
-
-        #endregion
-
-        #region Unity 生命周期
 
         private void Awake()
         {
@@ -130,16 +108,14 @@ namespace SqrtVINS
             _frameQueue = new ConcurrentQueue<FrameData>();
             _bufferPool = new ConcurrentQueue<byte[]>();
             _workerSignal = new AutoResetEvent(false);
+            _cancellationTokenSource = new CancellationTokenSource();
         }
 
         private void OnDestroy()
         {
             Shutdown();
-            if (_workerSignal != null)
-            {
-                _workerSignal.Close();
-                _workerSignal = null;
-            }
+            _workerSignal?.Close();
+            _cancellationTokenSource?.Dispose();
         }
 
         private void OnApplicationPause(bool pauseStatus)
@@ -185,10 +161,6 @@ namespace SqrtVINS
             }
         }
 
-        #endregion
-
-        #region 公共方法
-
         public bool Initialize()
         {
             return InitializeSystem(new VONative.VOCameraParams
@@ -216,13 +188,13 @@ namespace SqrtVINS
                 return false;
             }
 
+            // Sync internal state
             imageWidth = cameraParams.width;
             imageHeight = cameraParams.height;
             focalLength = cameraParams.fx;
 
             SetState(VOState.Initializing);
 
-            // 设置跟踪参数
             VONative.VOTrackingParams trackingParams = new VONative.VOTrackingParams
             {
                 maxFeatures = maxFeatures,
@@ -231,7 +203,7 @@ namespace SqrtVINS
                 minDistance = 20f
             };
 
-            int result = 0;
+            int result;
             IntPtr ptr = Marshal.AllocHGlobal(Marshal.SizeOf(trackingParams));
             try
             {
@@ -253,10 +225,7 @@ namespace SqrtVINS
             {
                 SetState(VOState.Running);
                 Debug.Log("[VOManager] VIO initialized successfully");
-                
-                // 启动工作线程
                 StartWorker();
-                
                 return true;
             }
             else
@@ -275,13 +244,9 @@ namespace SqrtVINS
         /// </summary>
         public bool ProcessFrame(byte[] imageData, int width, int height, int channels, double timestamp)
         {
-            if (_currentState != VOState.Running && _currentState != VOState.Lost)
-            {
-                return false;
-            }
+            if (_currentState != VOState.Running && _currentState != VOState.Lost) return false;
 
-            // 简单的背压控制：如果队列太长，直接丢弃（避免内存爆炸和延迟累积）
-            // 注意：VIO 丢帧可能导致跟丢，但处理不过来时也没办法
+            // Simple backpressure
             if (_frameQueue.Count >= MAX_QUEUE_SIZE)
             {
                 _dropCount++;
@@ -290,17 +255,16 @@ namespace SqrtVINS
                 return false;
             }
 
-            // 1. 从 Pool 获取或新建 Buffer
-            byte[] buffer;
-            if (!_bufferPool.TryDequeue(out buffer) || buffer.Length != imageData.Length)
+            // 1. Get buffer from pool
+            if (!_bufferPool.TryDequeue(out byte[] buffer) || buffer.Length != imageData.Length)
             {
                 buffer = new byte[imageData.Length];
             }
 
-            // 2. 拷贝数据 (主线程唯一的开销)
+            // 2. Copy data (Main thread overhead)
             Array.Copy(imageData, buffer, imageData.Length);
 
-            // 3. 入队
+            // 3. Enqueue
             _frameQueue.Enqueue(new FrameData
             {
                 Data = buffer,
@@ -310,7 +274,7 @@ namespace SqrtVINS
                 Timestamp = timestamp
             });
 
-            // 4. 唤醒工作线程
+            // 4. Signal worker
             _workerSignal.Set();
 
             return true;
@@ -319,7 +283,7 @@ namespace SqrtVINS
         public void Reset()
         {
             if (_currentState == VOState.Uninitialized) return;
-            // Reset 操作也应该在 VIO 线程或者加锁，这里简单起见，且假设 C++ 层有锁
+            
             try
             {
                 VONative.vo_reset();
@@ -351,129 +315,119 @@ namespace SqrtVINS
             SetState(VOState.Uninitialized);
         }
 
-        #endregion
-
-        #region 工作线程
-
         private void StartWorker()
         {
             if (_workerThread != null && _workerThread.IsAlive) return;
 
-            _shouldStopWorker = false;
-            _workerThread = new Thread(WorkerLoop);
-            _workerThread.Name = "VIO_Worker_Thread";
-            _workerThread.IsBackground = true;
+            // Renew cancellation token if needed being careful with disposal
+            if (_cancellationTokenSource != null && _cancellationTokenSource.IsCancellationRequested)
+            {
+                _cancellationTokenSource.Dispose();
+                _cancellationTokenSource = new CancellationTokenSource();
+            }
+
+            _workerThread = new Thread(WorkerLoop)
+            {
+                Name = "VIO_Worker_Thread",
+                IsBackground = true
+            };
             _workerThread.Start();
             Debug.Log("[VOManager] Worker thread started");
         }
 
         private void StopWorker()
         {
-            _shouldStopWorker = true;
-            if (_workerSignal != null) _workerSignal.Set(); // 唤醒以便退出
+            if (_cancellationTokenSource != null && !_cancellationTokenSource.IsCancellationRequested)
+                _cancellationTokenSource.Cancel();
             
+            _workerSignal?.Set(); // Wake up to check cancellation
+
             if (_workerThread != null)
             {
-                if (!_workerThread.Join(1000)) // 等待最多1秒
+                if (!_workerThread.Join(500)) // Wait 500ms
                 {
-                    Debug.LogWarning("[VOManager] Worker thread join timed out, aborting...");
-                    _workerThread.Abort();
+                    Debug.LogWarning("[VOManager] Worker thread join timed out");
                 }
                 _workerThread = null;
             }
             
-            // 清理队列和缓冲池
-            FrameData data;
-            while (_frameQueue != null && _frameQueue.TryDequeue(out data)) { }
+            // Clear queue
+            while (_frameQueue.TryDequeue(out _)) { }
         }
 
         private void WorkerLoop()
         {
-            while (!_shouldStopWorker)
+            try 
             {
-                // 等待信号 或 超时（避免死等）
-                _workerSignal.WaitOne(100);
-
-                if (_shouldStopWorker) break;
-
-                // 处理队列中的所有帧
-                FrameData frame;
-                while (_frameQueue.TryDequeue(out frame))
+                while (_cancellationTokenSource != null && !_cancellationTokenSource.IsCancellationRequested)
                 {
-                    ProcessFrameInternal(frame);
-                    
-                    // 归还 buffer 到 pool
-                    if (_bufferPool.Count < 30) // 限制 Pool 大小
-                    {
-                        _bufferPool.Enqueue(frame.Data);
-                    }
-                }
-            }
-            Debug.Log("[VOManager] Worker thread exited");
-        }
+                    _workerSignal.WaitOne(100);
 
-        private void ProcessFrameInternal(FrameData frame)
-        {
-            try
-            {
-                GCHandle handle = GCHandle.Alloc(frame.Data, GCHandleType.Pinned);
-                try
-                {
-                    int result = VONative.vo_process_frame(
-                        handle.AddrOfPinnedObject(),
-                        frame.Width,
-                        frame.Height,
-                        frame.Channels,
-                        frame.Timestamp
-                    );
+                    if (_cancellationTokenSource.IsCancellationRequested) break;
 
-                    if (result == 0)
+                    while (_frameQueue.TryDequeue(out FrameData frame))
                     {
-                        _frameCount++;
-                        if (_frameCount % 30 == 0)
-                        {
-                            Debug.Log($"[VOManager] Processed {_frameCount} frames (Worker)");
-                        }
-                        
-                        // 立即更新位姿
-                        VONative.VOPose newPose = new VONative.VOPose();
-                        if (VONative.vo_get_pose(ref newPose) == 0 && newPose.valid != 0)
-                        {
-                            lock (_poseLock)
-                            {
-                                _currentPose = newPose;
-                                _hasNewPose = true;
-                            }
-                        }
+                         if (_cancellationTokenSource.IsCancellationRequested) break;
+                         ProcessFrameInternal(frame);
+                         if (_bufferPool.Count < 30) _bufferPool.Enqueue(frame.Data);
                     }
-                    else
-                    {
-                        Debug.LogWarning($"[VOManager] Worker process failed: {result}");
-                    }
-                }
-                finally
-                {
-                    handle.Free();
                 }
             }
             catch (Exception e)
             {
-                Debug.LogError($"[VOManager] Worker exception: {e.Message}");
+                Debug.LogError($"[VOManager] Worker thread exception: {e.Message}");
+            }
+            finally
+            {
+                Debug.Log("[VOManager] Worker thread exited");
             }
         }
 
-        #endregion
+        private void ProcessFrameInternal(FrameData frame)
+        {
+            GCHandle handle = GCHandle.Alloc(frame.Data, GCHandleType.Pinned);
+            try
+            {
+                int result = VONative.vo_process_frame(
+                    handle.AddrOfPinnedObject(),
+                    frame.Width,
+                    frame.Height,
+                    frame.Channels,
+                    frame.Timestamp
+                );
+
+                if (result == 0)
+                {
+                    _frameCount++;
+                    // Only log periodically to reduce spam
+                    if (_frameCount % 100 == 0) Debug.Log($"[VOManager] Processed {_frameCount} frames");
+                    
+                    VONative.VOPose newPose = new VONative.VOPose();
+                    if (VONative.vo_get_pose(ref newPose) == 0 && newPose.valid != 0)
+                    {
+                        lock (_poseLock)
+                        {
+                            _currentPose = newPose;
+                            _hasNewPose = true;
+                        }
+                    }
+                }
+            }
+            catch (Exception e)
+            {
+                 Debug.LogError($"[VOManager] Pinned memory exception: {e.Message}");
+            }
+            finally
+            {
+                handle.Free();
+            }
+        }
 
         private void SetState(VOState newState)
         {
             if (_currentState != newState)
             {
                 _currentState = newState;
-                // 注意：StateChanged 事件仍在主线程触发（如果在 Update 中检测到不一致），
-                // 或者在这里触发但要小心线程安全。目前为了简单，只在主线程分发 OnPoseUpdated。
-                // 如果需要严格的状态事件，建议都放到 Update 里检测。
-                // 这里暂时直接 Invoke 可能有风险，但也可能没事（取决于订阅者是否操作 Unity API）
-                // 安全起见，我们只打印 Log
                 Debug.Log($"[VOManager] State changed to: {newState}");
             }
         }

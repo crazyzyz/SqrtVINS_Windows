@@ -11,8 +11,6 @@ namespace SqrtVINS
     /// </summary>
     public class AndroidCameraController : MonoBehaviour
     {
-        #region 配置
-
         [Header("相机设置")]
         [SerializeField] private int requestedWidth = 640;
         [SerializeField] private int requestedHeight = 480;
@@ -31,10 +29,6 @@ namespace SqrtVINS
         [SerializeField] private VODebugRenderer debugRenderer;
         [SerializeField] private bool useNativeDebugImage = true;
 
-        #endregion
-
-        #region 状态
-
         private WebCamTexture _webCamTexture;
         private Color32[] _pixelBuffer;
         private byte[] _grayBuffer;
@@ -45,25 +39,17 @@ namespace SqrtVINS
         public int ActualWidth => _webCamTexture != null ? _webCamTexture.width : 0;
         public int ActualHeight => _webCamTexture != null ? _webCamTexture.height : 0;
 
-        #endregion
-
-        #region 事件
-
         public event Action<byte[], int, int, double> OnFrameReady;
         public event Action OnCameraStarted;
         public event Action OnCameraStopped;
-        public event Action<string> OnCameraError;
 
-        #endregion
-
-        #region Unity 生命周期
 
         private bool _hasStarted = false;
 
         private void Start()
         {
 #if UNITY_ANDROID && !UNITY_EDITOR
-            StartCoroutine(RequestCameraPermissionAndStart());
+            StartCoroutine(StartCameraSequence());
 #else
             // 编辑器或其他平台直接启动
             StartCamera();
@@ -97,29 +83,17 @@ namespace SqrtVINS
             {
                 ProcessCameraFrame();
             }
+            
+            UpdatePose();
         }
 
-        #endregion
 
-        #region 公共方法
-
-        /// <summary>
-        /// 启动相机
-        /// </summary>
         public void StartCamera()
         {
-            if (_isRunning)
-            {
-                Debug.LogWarning("[AndroidCamera] Camera already running");
-                return;
-            }
-
-            StartCoroutine(StartCameraCoroutine());
+            if (_isRunning) return;
+            StartCoroutine(StartCameraSequence());
         }
 
-        /// <summary>
-        /// 停止相机
-        /// </summary>
         public void StopCamera()
         {
             if (_webCamTexture != null)
@@ -131,12 +105,9 @@ namespace SqrtVINS
 
             _isRunning = false;
             OnCameraStopped?.Invoke();
-            Debug.Log("[AndroidCamera] Camera stopped");
+            Debug.Log("[AndroidCamera] Stopped.");
         }
 
-        /// <summary>
-        /// 切换前后摄像头
-        /// </summary>
         public void ToggleCamera()
         {
             useFrontCamera = !useFrontCamera;
@@ -144,149 +115,128 @@ namespace SqrtVINS
             StartCamera();
         }
 
-        #endregion
-
-        #region 私有方法
-
-        private IEnumerator RequestCameraPermissionAndStart()
+        [Header("Pose Driving")]
+        [SerializeField] private bool drivePose = true;
+        [SerializeField] private Transform poseTarget;
+        
+        private void UpdatePose()
         {
-#if UNITY_ANDROID
-            // 检查相机权限
+            if (!drivePose || VOManager.Instance == null || !VOManager.Instance.IsTracking) return;
+            
+            if (poseTarget == null && Camera.main != null) 
+                poseTarget = Camera.main.transform;
+
+            if (poseTarget != null)
+            {
+                var pose = VOManager.Instance.CurrentPose;
+                poseTarget.position = pose.position;
+                poseTarget.rotation = pose.rotation;
+            }
+        }
+
+        private IEnumerator StartCameraSequence()
+        {
+#if UNITY_ANDROID && !UNITY_EDITOR
             if (!UnityEngine.Android.Permission.HasUserAuthorizedPermission(UnityEngine.Android.Permission.Camera))
             {
                 UnityEngine.Android.Permission.RequestUserPermission(UnityEngine.Android.Permission.Camera);
-                
-                // 等待用户响应
                 yield return new WaitForSeconds(0.5f);
-                
                 while (!UnityEngine.Android.Permission.HasUserAuthorizedPermission(UnityEngine.Android.Permission.Camera))
                 {
                     yield return new WaitForSeconds(0.5f);
                 }
             }
 #endif
-            StartCamera();
-            yield return null;
+            yield return StartCameraInternal();
         }
 
-        private IEnumerator StartCameraCoroutine()
+        private IEnumerator StartCameraInternal()
         {
-            // 获取可用相机列表
-            WebCamDevice[] devices = WebCamTexture.devices;
-
+            var devices = WebCamTexture.devices;
             if (devices.Length == 0)
             {
-                Debug.LogError("[AndroidCamera] No camera devices found");
-                OnCameraError?.Invoke("No camera devices found");
+                Debug.LogError("[AndroidCamera] No devices found.");
                 yield break;
             }
 
-            // 选择相机
-            string deviceName = "";
-            foreach (var device in devices)
+            string deviceName = devices[0].name;
+            foreach (var d in devices)
             {
-                Debug.Log($"[AndroidCamera] Found camera: {device.name}, isFront: {device.isFrontFacing}");
-                if (device.isFrontFacing == useFrontCamera)
+                if (d.isFrontFacing == useFrontCamera)
                 {
-                    deviceName = device.name;
+                    deviceName = d.name;
                     break;
                 }
             }
 
-            if (string.IsNullOrEmpty(deviceName))
-            {
-                deviceName = devices[0].name;
-            }
-
-            Debug.Log($"[AndroidCamera] Using camera: {deviceName}");
-
-            // 创建 WebCamTexture
             _webCamTexture = new WebCamTexture(deviceName, requestedWidth, requestedHeight, requestedFPS);
             _webCamTexture.Play();
 
-            // 等待相机启动
-            int timeout = 50; // 5 秒超时
+            // Timeout safety
+            float timeout = 5f;
             while (!_webCamTexture.didUpdateThisFrame && timeout > 0)
             {
                 yield return new WaitForSeconds(0.1f);
-                timeout--;
+                timeout -= 0.1f;
             }
 
             if (!_webCamTexture.isPlaying)
             {
-                Debug.LogError("[AndroidCamera] Failed to start camera");
-                OnCameraError?.Invoke("Failed to start camera");
+                Debug.LogError("[AndroidCamera] Failed to play webcam.");
                 yield break;
             }
 
-            // 初始化缓冲区
-            int width = _webCamTexture.width;
-            int height = _webCamTexture.height;
-            _pixelBuffer = new Color32[width * height];
-            _grayBuffer = new byte[width * height];
+            // Init buffers
+            int w = _webCamTexture.width;
+            int h = _webCamTexture.height;
+            _pixelBuffer = new Color32[w * h];
+            _grayBuffer = new byte[w * h];
             _startTime = Time.realtimeSinceStartupAsDouble;
 
-            Debug.Log($"[AndroidCamera] Camera started: {width}x{height}");
+            Debug.Log($"[AndroidCamera] Started: {w}x{h}");
 
-            // 设置预览
+            // Preview Setup
             if (showPreview && previewImage != null && !useNativeDebugImage)
             {
                 previewImage.texture = _webCamTexture;
                 previewImage.gameObject.SetActive(true);
-                
-                // 调整预览方向
                 AdjustPreviewOrientation();
             }
-
 
             _isRunning = true;
             OnCameraStarted?.Invoke();
 
-            // 自动启动 VIO
-            if (autoStartVIO)
-            {
-                InitializeVIO(width, height);
-            }
+            if (autoStartVIO) InitializeVIO(w, h);
         }
 
         private void ProcessCameraFrame()
         {
-            if (_webCamTexture == null || !_webCamTexture.isPlaying)
-            {
-                return;
-            }
+            if (_webCamTexture == null || !_webCamTexture.isPlaying) return;
 
-            int width = _webCamTexture.width;
-            int height = _webCamTexture.height;
-
-            // 获取像素数据
             _webCamTexture.GetPixels32(_pixelBuffer);
+            
+            // Conversion happens here
+            ProcessGrayscale(_pixelBuffer, _grayBuffer);
 
-            // 转换为灰度图
-            ConvertToGrayscale(_pixelBuffer, _grayBuffer, width, height);
+            double ts = Time.realtimeSinceStartupAsDouble - _startTime;
+            OnFrameReady?.Invoke(_grayBuffer, _webCamTexture.width, _webCamTexture.height, ts);
 
-            // 计算时间戳
-            double timestamp = Time.realtimeSinceStartupAsDouble - _startTime;
-
-            // 触发帧就绪事件
-            OnFrameReady?.Invoke(_grayBuffer, width, height, timestamp);
-
-            // 如果 VOManager 存在且已初始化，则处理帧
-            if (VOManager.Instance != null && VOManager.Instance.CurrentState != VOManager.VOState.Uninitialized
-                && VOManager.Instance.CurrentState != VOManager.VOState.Error)
+            if (VOManager.Instance != null && VOManager.Instance.CurrentState == VOManager.VOState.Running)
             {
-                VOManager.Instance.ProcessFrame(_grayBuffer, width, height, 1, timestamp);
+                VOManager.Instance.ProcessFrame(_grayBuffer, _webCamTexture.width, _webCamTexture.height, 1, ts);
             }
         }
 
-        private void ConvertToGrayscale(Color32[] pixels, byte[] gray, int width, int height)
+        // Optimized conversion loop (unsafe) or standard logic? 
+        // Keeping it safe but clean.
+        private static void ProcessGrayscale(Color32[] input, byte[] output)
         {
-            // 使用加权平均转换为灰度
-            // Y = 0.299 R + 0.587 G + 0.114 B
-            for (int i = 0; i < pixels.Length; i++)
+            int len = input.Length;
+            for (int i = 0; i < len; i++)
             {
-                Color32 c = pixels[i];
-                gray[i] = (byte)(0.299f * c.r + 0.587f * c.g + 0.114f * c.b);
+                Color32 c = input[i];
+                // Integer math is faster than float: Y = (77*R + 150*G + 29*B) >> 8
+                output[i] = (byte)((77 * c.r + 150 * c.g + 29 * c.b) >> 8);
             }
         }
 
@@ -294,81 +244,49 @@ namespace SqrtVINS
         {
             if (previewImage == null) return;
 
-            int width = _webCamTexture.width;
-            int height = _webCamTexture.height;
-            int videoAngle = _webCamTexture.videoRotationAngle;
+            int angle = -_webCamTexture.videoRotationAngle;
+            var fitter = previewImage.GetComponent<AspectRatioFitter>();
             
-            Debug.Log($"[AndroidCamera] AdjustPreview: texture={width}x{height}, videoRotationAngle={videoAngle}, useFrontCamera={useFrontCamera}");
-
-            // 设置 AspectRatioFitter（如果存在）
-            var aspectFitter = previewImage.GetComponent<AspectRatioFitter>();
-            if (aspectFitter != null)
+            if (fitter != null)
             {
-                aspectFitter.aspectMode = AspectRatioFitter.AspectMode.FitInParent;
-                aspectFitter.aspectRatio = (float)width / height;
-                Debug.Log($"[AndroidCamera] AspectRatioFitter found, mode=FitInParent, ratio={aspectFitter.aspectRatio}");
-            }
-            else
-            {
-                Debug.LogWarning("[AndroidCamera] AspectRatioFitter component NOT found on previewImage!");
-            }
-
-            // 根据相机旋转调整预览
-            int angle = -videoAngle;
-            
-            // 如果旋转了 90 或 270 度，需要交换宽高比
-            if (Mathf.Abs(videoAngle) == 90 || Mathf.Abs(videoAngle) == 270)
-            {
-                if (aspectFitter != null)
-                {
-                    aspectFitter.aspectRatio = (float)height / width;
-                }
+                fitter.aspectMode = AspectRatioFitter.AspectMode.FitInParent;
+                float ratio = (float)_webCamTexture.width / _webCamTexture.height;
+                
+                // Swap ratio if rotated 90 deg
+                if (Mathf.Abs(angle) == 90 || Mathf.Abs(angle) == 270) ratio = 1f / ratio;
+                fitter.aspectRatio = ratio;
             }
             
             previewImage.rectTransform.localEulerAngles = new Vector3(0, 0, angle);
-
-            // 前置摄像头需要水平翻转
-            if (useFrontCamera)
-            {
-                previewImage.rectTransform.localScale = new Vector3(-1, 1, 1);
-            }
-            else
-            {
-                previewImage.rectTransform.localScale = Vector3.one;
-            }
+            
+            // Mirror scale if front camera
+            float scaleX = useFrontCamera ? -1 : 1;
+            previewImage.rectTransform.localScale = new Vector3(scaleX, 1, 1);
         }
 
         private void InitializeVIO(int width, int height)
         {
+            // Do not create if exists!
             if (VOManager.Instance == null)
             {
-                Debug.LogWarning("[AndroidCamera] VOManager not found, creating one");
-                GameObject go = new GameObject("VOManager");
-                go.AddComponent<VOManager>();
+                 GameObject go = new GameObject("VOManager");
+                 go.AddComponent<VOManager>();
             }
 
-            VONative.VOCameraParams cameraParams = new VONative.VOCameraParams
+            VONative.VOCameraParams cam = new VONative.VOCameraParams
             {
-                fx = focalLengthEstimate,
-                fy = focalLengthEstimate,
-                cx = width / 2f,
-                cy = height / 2f,
-                width = width,
-                height = height,
-                k1 = 0, k2 = 0, p1 = 0, p2 = 0
+                fx = focalLengthEstimate, fy = focalLengthEstimate,
+                cx = width/2f, cy = height/2f,
+                width = width, height = height
             };
 
-            VOManager.Instance.Initialize(cameraParams);
-            
-            // 初始化调试渲染器
+            VOManager.Instance.Initialize(cam);
+
             if (useNativeDebugImage && debugRenderer != null)
             {
                 debugRenderer.Initialize(width, height);
-                Debug.Log("[AndroidCamera] Debug renderer initialized");
             }
         }
-
-
-        #endregion
+    
     }
 }
