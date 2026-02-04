@@ -217,6 +217,31 @@ VO_API const char *vo_get_error_string(VOErrorCode code);
  */
 VO_API void vo_get_version(int *major, int *minor, int *patch);
 
+// ============================================================================
+// Native Rendering Plugin Interface
+// ============================================================================
+
+/**
+ * @brief Function pointer type for Unity rendering events
+ */
+typedef void (*UnityRenderEventCallback)(int);
+
+/**
+ * @brief Get the specific rendering event callback for Unity
+ * @return Function pointer to be passed to GL.IssuePluginEvent
+ */
+VO_API UnityRenderEventCallback vo_get_render_event_func(void);
+
+/**
+ * @brief Set the native texture pointer (e.g., OpenGL ID)
+ * @param texture_ptr Pointer to the native texture (cast from intptr_t)
+ * @param width Texture width
+ * @param height Texture height
+ * @return VO_SUCCESS on success
+ */
+VO_API VOErrorCode vo_set_native_texture(void *texture_ptr, int width,
+                                         int height);
+
 #ifdef __cplusplus
 }
 #endif

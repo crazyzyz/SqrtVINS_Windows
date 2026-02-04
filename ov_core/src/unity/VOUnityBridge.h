@@ -13,7 +13,6 @@
 #include <unordered_map>
 #include <vector>
 
-
 #include <Eigen/Dense>
 #include <opencv2/core.hpp>
 
@@ -133,6 +132,16 @@ public:
   VOErrorCode getDebugImage(uint8_t *out, int width, int height,
                             bool drawPoints, bool drawFlow) const;
 
+  /**
+   * @brief Set native texture pointer (e.g., OpenGL texture ID)
+   */
+  VOErrorCode setNativeTexture(void *ptr, int width, int height);
+
+  /**
+   * @brief Handle Unity rendering event
+   */
+  void onRenderEvent(int eventID);
+
 private:
   VOUnityBridge();
   ~VOUnityBridge();
@@ -165,6 +174,11 @@ private:
 
   // Previous feature positions for optical flow visualization
   mutable std::unordered_map<int, cv::Point2f> prev_feature_positions_;
+
+  // Native texture
+  void *native_texture_ptr_ = nullptr;
+  int texture_width_ = 0;
+  int texture_height_ = 0;
 };
 
 } // namespace ov_core

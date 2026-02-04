@@ -766,9 +766,8 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: eebf80ccd4d6d144fa55dea1a3e1a246, type: 3}
   m_Name: 
   m_EditorClassIdentifier: 
-  targetImage: {fileID: 865416259}
-  drawFeaturePoints: 1
-  drawOpticalFlow: 1
+  debugImage: {fileID: 865416259}
+  aspectRatioFitter: {fileID: 865416261}
   useDebugImage: 1
 --- !u!4 &1994433040
 Transform:

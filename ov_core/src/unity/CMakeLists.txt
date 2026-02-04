@@ -91,7 +91,9 @@ set_target_properties(vo_unity PROPERTIES
 target_link_libraries(vo_unity PRIVATE
     ${OpenCV_LIBRARIES}
     log  # Android log library
+    GLESv2 # OpenGL ES 2.0
 )
+
 
 # Strip debug symbols in Release mode
 if(CMAKE_BUILD_TYPE STREQUAL "Release")

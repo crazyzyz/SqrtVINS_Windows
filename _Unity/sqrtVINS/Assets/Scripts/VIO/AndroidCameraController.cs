@@ -229,7 +229,7 @@ namespace SqrtVINS
             Debug.Log($"[AndroidCamera] Camera started: {width}x{height}");
 
             // 设置预览
-            if (showPreview && previewImage != null)
+            if (showPreview && previewImage != null && !useNativeDebugImage)
             {
                 previewImage.texture = _webCamTexture;
                 previewImage.gameObject.SetActive(true);
@@ -237,6 +237,7 @@ namespace SqrtVINS
                 // 调整预览方向
                 AdjustPreviewOrientation();
             }
+
 
             _isRunning = true;
             OnCameraStarted?.Invoke();

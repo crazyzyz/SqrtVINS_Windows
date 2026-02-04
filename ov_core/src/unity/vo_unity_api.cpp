@@ -10,8 +10,20 @@
 
 // Version information
 #define VO_VERSION_MAJOR 1
-#define VO_VERSION_MINOR 0
+#define VO_VERSION_MINOR 1
 #define VO_VERSION_PATCH 0
+
+#if defined(__CYGWIN32__) || defined(WIN32) || defined(_WIN32) ||              \
+    defined(__WIN32__) || defined(_WIN64) || defined(WINAPI_FAMILY)
+#define UNITY_INTERFACE_API __stdcall
+#else
+#define UNITY_INTERFACE_API
+#endif
+
+// Static callback function that strictly matches Unity's signature
+static void UNITY_INTERFACE_API OnRenderEvent(int eventID) {
+  ov_core::VOUnityBridge::getInstance().onRenderEvent(eventID);
+}
 
 // ============================================================================
 // Initialization and Shutdown
@@ -186,3 +198,21 @@ void vo_get_version(int *major, int *minor, int *patch) {
   if (patch)
     *patch = VO_VERSION_PATCH;
 }
+
+// ============================================================================
+// Native Rendering Plugin Interface
+// ============================================================================
+
+extern "C" {
+
+VO_API UnityRenderEventCallback vo_get_render_event_func(void) {
+  return OnRenderEvent;
+}
+
+VO_API VOErrorCode vo_set_native_texture(void *texture_ptr, int width,
+                                         int height) {
+  return ov_core::VOUnityBridge::getInstance().setNativeTexture(texture_ptr,
+                                                                width, height);
+}
+
+} // extern "C"

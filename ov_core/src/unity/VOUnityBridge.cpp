@@ -13,6 +13,17 @@
 #include <cmath>
 #include <cstring>
 
+#if defined(__ANDROID__) || defined(ANDROID)
+#include <GLES2/gl2.h>
+#elif defined(_WIN32)
+#include <GL/gl.h>
+#include <windows.h>
+// Windows 可能需要 glext.h 来获取 GL_RGBA 等定义，或者直接使用 GL_RGBA
+#ifndef GL_RG
+#define GL_RG 0x8227
+#endif
+#endif
+
 namespace ov_core {
 
 VOUnityBridge &VOUnityBridge::getInstance() {
@@ -430,6 +441,101 @@ VOErrorCode VOUnityBridge::getDebugImage(uint8_t *out, int width, int height,
     return VO_SUCCESS;
   } catch (const std::exception &e) {
     return VO_ERROR_TRACKING_FAILED;
+  }
+}
+
+VOErrorCode VOUnityBridge::setNativeTexture(void *ptr, int width, int height) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  native_texture_ptr_ = ptr;
+  texture_width_ = width;
+  texture_height_ = height;
+  return VO_SUCCESS;
+}
+
+#include <android/log.h>
+#define LOG_TAG "VOUnityNative"
+#define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
+
+void VOUnityBridge::onRenderEvent(int eventID) {
+  // We only support eventID 1 for texture update
+  if (eventID != 1)
+    return;
+
+  std::lock_guard<std::mutex> lock(mutex_);
+
+  if (native_texture_ptr_ == nullptr || current_frame_.empty())
+    return;
+
+  if (texture_width_ == 0 || texture_height_ == 0)
+    return;
+
+  // Reset GL state/error
+  while (glGetError() != GL_NO_ERROR)
+    ;
+
+  try {
+    // Convert grayscale to RGBA
+    cv::Mat debugImg;
+    cv::cvtColor(current_frame_, debugImg, cv::COLOR_GRAY2RGBA);
+
+    // Get current features
+    if (initialized_ && vo_ != nullptr) {
+      TrackBase *tracker = vo_->getTracker();
+      if (tracker != nullptr) {
+        auto last_obs = tracker->get_last_obs();
+        auto last_ids = tracker->get_last_ids();
+
+        if (last_obs.find(0) != last_obs.end() &&
+            last_ids.find(0) != last_ids.end()) {
+          const auto &keypoints = last_obs[0];
+          const auto &ids = last_ids[0];
+
+          for (size_t i = 0; i < keypoints.size(); ++i) {
+            cv::Point2f pt(keypoints[i].pt.x, keypoints[i].pt.y);
+            int id = static_cast<int>(ids[i]);
+
+            // Draw optical flow (green line)
+            auto prevIt = prev_feature_positions_.find(id);
+            if (prevIt != prev_feature_positions_.end()) {
+              cv::Point2f prevPt = prevIt->second;
+              float dist = cv::norm(pt - prevPt);
+              if (dist < texture_width_ * 0.2f) {
+                cv::line(debugImg, prevPt, pt, cv::Scalar(0, 255, 0, 255), 2);
+              }
+            }
+
+            // Draw feature point (red filled circle)
+            cv::circle(debugImg, pt, 4, cv::Scalar(255, 0, 0, 255), -1);
+
+            // Update previous position for next frame
+            // Note: We are updating this in render thread, which might be
+            // slightly out of sync with processFrame thread, but for
+            // visualization it is acceptable. To be strictly correct, this
+            // should be done in processFrame, but we do it here for vis.
+            prev_feature_positions_[id] = pt;
+          }
+        }
+      }
+    }
+
+    // Scale if texture size doesn't match frame size (unlikely but safe)
+    if (debugImg.rows != texture_height_ || debugImg.cols != texture_width_) {
+      cv::resize(debugImg, debugImg, cv::Size(texture_width_, texture_height_));
+    }
+
+    // OpenGL Upload
+    // Cast void* to GLuint (safe on 32/64 bit as long as texture ID fits in
+    // pointer-sized int)
+    GLuint glTexId = (GLuint)(size_t)(native_texture_ptr_);
+
+    glBindTexture(GL_TEXTURE_2D, glTexId);
+    // Update the texture data
+    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, texture_width_, texture_height_,
+                    GL_RGBA, GL_UNSIGNED_BYTE, debugImg.data);
+    glBindTexture(GL_TEXTURE_2D, 0);
+
+  } catch (...) {
+    // Silently ignore errors in render thread to avoid crashing
   }
 }
 

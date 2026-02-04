@@ -135,10 +135,24 @@ namespace SqrtVINS
         public static extern int vo_reset();
 
         /// <summary>
-        /// 获取版本号
+        /// 获取版本号 (这里的签名可能需要修正，原生是 void vo_get_version(int*, int*, int*))
+        /// 原来的 vo_get_version 是 (IntPtr, int) 可能是错误的，不过我们先加上新的函数
         /// </summary>
         [DllImport(DLL_NAME, CallingConvention = CallingConvention.Cdecl)]
-        public static extern int vo_get_version(IntPtr buffer, int bufferSize);
+        public static extern void vo_get_version(ref int major, ref int minor, ref int patch);
+
+        /// <summary>
+        /// 获取 Unity 渲染事件回调函数
+        /// </summary>
+        [DllImport(DLL_NAME, CallingConvention = CallingConvention.Cdecl)]
+        public static extern IntPtr vo_get_render_event_func();
+
+        /// <summary>
+        /// 设置原生纹理指针 (OpenGL Texture ID)
+        /// </summary>
+        [DllImport(DLL_NAME, CallingConvention = CallingConvention.Cdecl)]
+        public static extern int vo_set_native_texture(IntPtr texturePtr, int width, int height);
+
 
         #endregion
 
@@ -178,16 +192,15 @@ namespace SqrtVINS
         /// </summary>
         public static string GetVersionString()
         {
-            byte[] buffer = new byte[128];
-            GCHandle handle = GCHandle.Alloc(buffer, GCHandleType.Pinned);
-            try
+            int major = 0, minor = 0, patch = 0;
+            try 
             {
-                vo_get_version(handle.AddrOfPinnedObject(), buffer.Length);
-                return System.Text.Encoding.UTF8.GetString(buffer).TrimEnd('\0');
+                vo_get_version(ref major, ref minor, ref patch);
+                return $"{major}.{minor}.{patch}";
             }
-            finally
+            catch (Exception)
             {
-                handle.Free();
+                return "Unknown";
             }
         }
 
