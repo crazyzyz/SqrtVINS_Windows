@@ -4,5 +4,8 @@
 EditorBuildSettings:
   m_ObjectHideFlags: 0
   serializedVersion: 2
-  m_Scenes: []
+  m_Scenes:
+  - enabled: 1
+    path: Assets/Scenes/VIODemo.unity
+    guid: 4cdbe9df9febc3f4a850c51899cdc570
   m_configObjects: {}
