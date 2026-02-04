@@ -163,11 +163,19 @@ namespace SqrtVINS
         /// </summary>
         public static Pose ToUnityPose(VOPose voPose)
         {
-            // VIO 使用右手坐标系，Unity 使用左手坐标系
-            // 需要进行坐标转换
-            Vector3 position = new Vector3(-voPose.px, voPose.py, voPose.pz);
-            Quaternion rotation = new Quaternion(-voPose.qx, voPose.qy, voPose.qz, -voPose.qw);
-            return new Pose(position, rotation);
+            // VIO 使用右手坐标系 (通常 Z 轴朝上)，Unity 使用左手坐标系 (Y 轴朝上)
+            // 1. 基础转换：右手转左手 (翻转 X 轴)
+            Vector3 rawPos = new Vector3(-voPose.px, voPose.py, voPose.pz);
+            // 修复：翻滚方向反了 -> 取反 Quaternion 的 Z 分量
+            // 原: Quaternion rawRot = new Quaternion(-voPose.qx, voPose.qy, voPose.qz, -voPose.qw);
+            // 新: Z 取反 (同时注意实部 w 的符号通常不需要变，但为了保持共轭关系，我们直接反转 Z 轴旋转分量)
+            Quaternion rawRot = new Quaternion(-voPose.qx, voPose.qy, -voPose.qz, -voPose.qw);
+            
+            // 2. 坐标系对齐：将 VIO 的 Z 轴向上对齐到 Unity 的 Y 轴向上
+            // 这通常需要绕 X 轴旋转 90 度
+            Quaternion fix = Quaternion.Euler(90, 0, 0);
+            
+            return new Pose(fix * rawPos, fix * rawRot);
         }
 
         /// <summary>

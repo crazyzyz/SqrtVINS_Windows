@@ -126,17 +126,8 @@ namespace SqrtVINS
 
         private void UpdateTrajectory(Vector3 currentPos)
         {
-            if (_pathPoints.Count == 0)
-            {
-                AddPoint(currentPos);
-                return;
-            }
-
-            float dist = Vector3.Distance(currentPos, _lastPoint);
-            if (dist > minDistanceBetweenPoints)
-            {
-                AddPoint(currentPos);
-            }
+            
+            AddPoint(currentPos);
         }
 
         private void AddPoint(Vector3 point)
