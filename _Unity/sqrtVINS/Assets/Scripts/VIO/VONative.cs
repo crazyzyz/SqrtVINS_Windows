@@ -118,6 +118,17 @@ namespace SqrtVINS
         public static extern int vo_get_point_cloud(IntPtr buffer, int maxPoints, ref int actualPoints);
 
         /// <summary>
+        /// 获取带有特征点和光流绘制的调试图像
+        /// </summary>
+        /// <param name="outputImage">输出 RGBA 图像缓冲区 (必须为 width*height*4 字节)</param>
+        /// <param name="width">图像宽度</param>
+        /// <param name="height">图像高度</param>
+        /// <param name="drawPoints">是否绘制特征点 (红色圆点)</param>
+        /// <param name="drawFlow">是否绘制光流线 (绿色线条)</param>
+        [DllImport(DLL_NAME, CallingConvention = CallingConvention.Cdecl)]
+        public static extern int vo_get_debug_image(IntPtr outputImage, int width, int height, int drawPoints, int drawFlow);
+
+        /// <summary>
         /// 重置跟踪
         /// </summary>
         [DllImport(DLL_NAME, CallingConvention = CallingConvention.Cdecl)]

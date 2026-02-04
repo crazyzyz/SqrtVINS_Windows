@@ -26,6 +26,10 @@ namespace SqrtVINS
         [Header("VIO 设置")]
         [SerializeField] private bool autoStartVIO = true;
         [SerializeField] private float focalLengthEstimate = 500f;
+        
+        [Header("调试渲染")]
+        [SerializeField] private VODebugRenderer debugRenderer;
+        [SerializeField] private bool useNativeDebugImage = true;
 
         #endregion
 
@@ -354,7 +358,15 @@ namespace SqrtVINS
             };
 
             VOManager.Instance.Initialize(cameraParams);
+            
+            // 初始化调试渲染器
+            if (useNativeDebugImage && debugRenderer != null)
+            {
+                debugRenderer.Initialize(width, height);
+                Debug.Log("[AndroidCamera] Debug renderer initialized");
+            }
         }
+
 
         #endregion
     }

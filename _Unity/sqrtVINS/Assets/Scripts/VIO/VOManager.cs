@@ -12,8 +12,7 @@ namespace SqrtVINS
     /// </summary>
     public class VOManager : MonoBehaviour
     {
-        #region 单例模式
-
+        
         private static VOManager _instance;
         public static VOManager Instance
         {
@@ -27,10 +26,6 @@ namespace SqrtVINS
             }
         }
 
-        #endregion
-
-        #region 配置参数
-
         [Header("相机参数")]
         [SerializeField] private float focalLength = 500f;
         [SerializeField] private int imageWidth = 640;
@@ -43,10 +38,6 @@ namespace SqrtVINS
         [Header("更新设置")]
         [SerializeField] private bool autoUpdate = true;
         [SerializeField] private float updateInterval = 0.033f; // 约 30 FPS
-
-        #endregion
-
-        #region 状态
 
         public enum VOState
         {
@@ -65,26 +56,11 @@ namespace SqrtVINS
 
         public bool IsTracking => _currentState == VOState.Running && _currentPose.valid != 0;
 
-        #endregion
-
-        #region 事件
-
         [Header("事件")]
         public UnityEvent<Pose> OnPoseUpdated;
         public UnityEvent<VOState> OnStateChanged;
         public UnityEvent OnTrackingLost;
         public UnityEvent OnTrackingRecovered;
-
-        // 特征点更新事件 (Buffer, Count)
-        public event Action<VONative.VOFeature[], int> OnFeaturesUpdated; 
-        
-        private VONative.VOFeature[] _featureBuffer;
-        private GCHandle _featureBufferHandle;
-        private const int FEATURE_BUFFER_SIZE = 1000;
-
-        #endregion
-
-        #region Unity 生命周期
 
         private void Awake()
         {
@@ -116,9 +92,6 @@ namespace SqrtVINS
             }
         }
 
-        #endregion
-
-        #region 公共方法
 
         /// <summary>
         /// 初始化 VIO 系统
@@ -145,16 +118,30 @@ namespace SqrtVINS
                     height = imageHeight,
                     k1 = 0, k2 = 0, p1 = 0, p2 = 0
                 };
-                
-                // 初始化特征点缓冲区
-                if (_featureBuffer == null || _featureBuffer.Length != FEATURE_BUFFER_SIZE)
+
+                // 设置跟踪参数
+                VONative.VOTrackingParams trackingParams = new VONative.VOTrackingParams
                 {
-                    if (_featureBufferHandle.IsAllocated) _featureBufferHandle.Free();
-                    _featureBuffer = new VONative.VOFeature[FEATURE_BUFFER_SIZE];
-                    _featureBufferHandle = GCHandle.Alloc(_featureBuffer, GCHandleType.Pinned);
+                    maxFeatures = maxFeatures,
+                    pyramidLevels = pyramidLevels,
+                    fastThreshold = 20, // 默认值
+                    minDistance = 20f   // 默认值
+                };
+
+                int result = 0;
+                
+                // 将结构体分配到非托管内存
+                IntPtr ptr = Marshal.AllocHGlobal(Marshal.SizeOf(trackingParams));
+                try
+                {
+                    Marshal.StructureToPtr(trackingParams, ptr, false);
+                    result = VONative.vo_initialize(ref cameraParams, ptr);
+                }
+                finally
+                {
+                    Marshal.FreeHGlobal(ptr);
                 }
 
-                int result = VONative.vo_initialize(ref cameraParams, IntPtr.Zero);
 
                 if (result == 0)
                 {
@@ -201,7 +188,27 @@ namespace SqrtVINS
 
             try
             {
-                int result = VONative.vo_initialize(ref cameraParams, IntPtr.Zero);
+                // 设置跟踪参数
+                VONative.VOTrackingParams trackingParams = new VONative.VOTrackingParams
+                {
+                    maxFeatures = maxFeatures,
+                    pyramidLevels = pyramidLevels,
+                    fastThreshold = 20,
+                    minDistance = 20f
+                };
+
+                int result = 0;
+                IntPtr ptr = Marshal.AllocHGlobal(Marshal.SizeOf(trackingParams));
+                try
+                {
+                    Marshal.StructureToPtr(trackingParams, ptr, false);
+                    result = VONative.vo_initialize(ref cameraParams, ptr);
+                }
+                finally
+                {
+                    Marshal.FreeHGlobal(ptr);
+                }
+
 
                 if (result == 0)
                 {
@@ -331,17 +338,7 @@ namespace SqrtVINS
             }
 
             SetState(VOState.Uninitialized);
-            
-            // 释放缓冲区
-            if (_featureBufferHandle.IsAllocated)
-            {
-                _featureBufferHandle.Free();
-            }
         }
-
-        #endregion
-
-        #region 私有方法
 
         private void UpdatePose()
         {
@@ -367,28 +364,6 @@ namespace SqrtVINS
                     SetState(VOState.Lost);
                     OnTrackingLost?.Invoke();
                 }
-                }
-            
-            // 更新特征点
-            UpdateFeatures();
-        }
-
-        private void UpdateFeatures()
-        {
-            if (_featureBuffer == null || !_featureBufferHandle.IsAllocated) return;
-
-            int count = 0;
-            // Native function will write directly to pinned array
-            int result = VONative.vo_get_features(_featureBufferHandle.AddrOfPinnedObject(), _featureBuffer.Length, ref count);
-            
-            if (_frameCount % 30 == 0) // 每30帧打印一次
-            {
-                Debug.Log($"[VOManager] UpdateFeatures: result={result}, count={count}");
-            }
-            
-            if (result == 0 && count > 0)
-            {
-                OnFeaturesUpdated?.Invoke(_featureBuffer, count);
             }
         }
 
@@ -414,6 +389,5 @@ namespace SqrtVINS
             }
         }
 
-        #endregion
     }
 }

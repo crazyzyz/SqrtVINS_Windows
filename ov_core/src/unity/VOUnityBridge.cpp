@@ -7,7 +7,6 @@
 #include "track/TrackBase.h"
 #include "visual_odometry/VisualOdometry.h"
 
-
 #include <opencv2/core.hpp>
 #include <opencv2/imgproc.hpp>
 
@@ -158,6 +157,9 @@ VOErrorCode VOUnityBridge::processFrame(const uint8_t *data, int width,
       cv::Mat rgba(height, width, CV_8UC4, const_cast<uint8_t *>(data));
       cv::cvtColor(rgba, gray, cv::COLOR_RGBA2GRAY);
     }
+
+    // Save current frame for debug visualization
+    current_frame_ = gray.clone();
 
     // Process the frame
     vo_->processFrame(gray, timestamp);
@@ -359,6 +361,76 @@ void VOUnityBridge::convertToUnityCoordinates(const Eigen::Matrix4d &pose,
   // Check if pose is valid (not identity or near-zero)
   double det = R.determinant();
   out.valid = (std::abs(det - 1.0) < 0.1) ? 1 : 0;
+}
+
+VOErrorCode VOUnityBridge::getDebugImage(uint8_t *out, int width, int height,
+                                         bool drawPoints, bool drawFlow) const {
+  std::lock_guard<std::mutex> lock(mutex_);
+
+  if (!initialized_ || vo_ == nullptr) {
+    return VO_ERROR_NOT_INITIALIZED;
+  }
+
+  if (out == nullptr || width != camera_params_.width ||
+      height != camera_params_.height) {
+    return VO_ERROR_INVALID_PARAM;
+  }
+
+  if (current_frame_.empty()) {
+    return VO_ERROR_INVALID_IMAGE;
+  }
+
+  try {
+    // Convert grayscale to RGBA
+    cv::Mat debugImg;
+    cv::cvtColor(current_frame_, debugImg, cv::COLOR_GRAY2RGBA);
+
+    // Get current features
+    TrackBase *tracker = vo_->getTracker();
+    if (tracker != nullptr) {
+      auto last_obs = tracker->get_last_obs();
+      auto last_ids = tracker->get_last_ids();
+
+      if (last_obs.find(0) != last_obs.end() &&
+          last_ids.find(0) != last_ids.end()) {
+        const auto &keypoints = last_obs[0];
+        const auto &ids = last_ids[0];
+
+        for (size_t i = 0; i < keypoints.size(); ++i) {
+          cv::Point2f pt(keypoints[i].pt.x, keypoints[i].pt.y);
+          int id = static_cast<int>(ids[i]);
+
+          // Draw optical flow (green line) if we have previous position
+          if (drawFlow) {
+            auto prevIt = prev_feature_positions_.find(id);
+            if (prevIt != prev_feature_positions_.end()) {
+              cv::Point2f prevPt = prevIt->second;
+              // Only draw if movement is reasonable (not a reset)
+              float dist = cv::norm(pt - prevPt);
+              if (dist < width * 0.2f) {
+                cv::line(debugImg, prevPt, pt, cv::Scalar(0, 255, 0, 255), 2);
+              }
+            }
+          }
+
+          // Draw feature point (red filled circle)
+          if (drawPoints) {
+            cv::circle(debugImg, pt, 4, cv::Scalar(255, 0, 0, 255), -1);
+          }
+
+          // Update previous position
+          prev_feature_positions_[id] = pt;
+        }
+      }
+    }
+
+    // Copy to output buffer (RGBA format)
+    std::memcpy(out, debugImg.data, width * height * 4);
+
+    return VO_SUCCESS;
+  } catch (const std::exception &e) {
+    return VO_ERROR_TRACKING_FAILED;
+  }
 }
 
 } // namespace ov_core
