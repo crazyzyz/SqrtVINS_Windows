@@ -411,7 +411,7 @@ VOErrorCode VOUnityBridge::getDebugImage(uint8_t *out, int width, int height,
           cv::Point2f pt(keypoints[i].pt.x, keypoints[i].pt.y);
           int id = static_cast<int>(ids[i]);
 
-          // Draw optical flow (green line) if we have previous position
+          // Draw optical flow (white line, matching test_webcam style)
           if (drawFlow) {
             auto prevIt = prev_feature_positions_.find(id);
             if (prevIt != prev_feature_positions_.end()) {
@@ -419,14 +419,20 @@ VOErrorCode VOUnityBridge::getDebugImage(uint8_t *out, int width, int height,
               // Only draw if movement is reasonable (not a reset)
               float dist = cv::norm(pt - prevPt);
               if (dist < width * 0.2f) {
-                cv::line(debugImg, prevPt, pt, cv::Scalar(0, 255, 0, 255), 2);
+                // White color like test_webcam's display_history
+                cv::line(debugImg, prevPt, pt, cv::Scalar(255, 255, 255, 255), 1);
               }
             }
           }
 
-          // Draw feature point (red filled circle)
+          // Draw feature point (red filled circle + blue rectangle, matching test_webcam style)
           if (drawPoints) {
-            cv::circle(debugImg, pt, 4, cv::Scalar(255, 0, 0, 255), -1);
+            // Red filled circle
+            cv::circle(debugImg, pt, 2, cv::Scalar(255, 0, 0, 255), -1);
+            // Blue rectangle around the point
+            cv::Point2f pt_top = cv::Point2f(pt.x - 3, pt.y - 3);
+            cv::Point2f pt_bot = cv::Point2f(pt.x + 3, pt.y + 3);
+            cv::rectangle(debugImg, pt_top, pt_bot, cv::Scalar(0, 0, 255, 255), 1);
           }
 
           // Update previous position
@@ -494,18 +500,21 @@ void VOUnityBridge::onRenderEvent(int eventID) {
             cv::Point2f pt(keypoints[i].pt.x, keypoints[i].pt.y);
             int id = static_cast<int>(ids[i]);
 
-            // Draw optical flow (green line)
+            // Draw optical flow (white line, matching test_webcam style)
             auto prevIt = prev_feature_positions_.find(id);
             if (prevIt != prev_feature_positions_.end()) {
               cv::Point2f prevPt = prevIt->second;
               float dist = cv::norm(pt - prevPt);
               if (dist < texture_width_ * 0.2f) {
-                cv::line(debugImg, prevPt, pt, cv::Scalar(0, 255, 0, 255), 2);
+                cv::line(debugImg, prevPt, pt, cv::Scalar(255, 255, 255, 255), 1);
               }
             }
 
-            // Draw feature point (red filled circle)
-            cv::circle(debugImg, pt, 4, cv::Scalar(255, 0, 0, 255), -1);
+            // Draw feature point (red circle + blue rectangle, matching test_webcam style)
+            cv::circle(debugImg, pt, 2, cv::Scalar(255, 0, 0, 255), -1);
+            cv::Point2f pt_top = cv::Point2f(pt.x - 3, pt.y - 3);
+            cv::Point2f pt_bot = cv::Point2f(pt.x + 3, pt.y + 3);
+            cv::rectangle(debugImg, pt_top, pt_bot, cv::Scalar(0, 0, 255, 255), 1);
 
             // Update previous position for next frame
             // Note: We are updating this in render thread, which might be
