@@ -173,7 +173,7 @@ MonoBehaviour:
   m_Name: 
   m_EditorClassIdentifier: 
   m_AspectMode: 0
-  m_AspectRatio: 1.4338294
+  m_AspectRatio: 1.2800782
 --- !u!114 &122983027
 MonoBehaviour:
   m_ObjectHideFlags: 0
@@ -402,6 +402,8 @@ MonoBehaviour:
   imageHeight: 480
   maxFeatures: 200
   pyramidLevels: 3
+  useImu: 1
+  imuUpdateRate: 100
   OnPoseUpdated:
     m_PersistentCalls:
       m_Calls: []
@@ -436,6 +438,7 @@ GameObject:
   m_Component:
   - component: {fileID: 459015945}
   - component: {fileID: 459015946}
+  - component: {fileID: 459015947}
   m_Layer: 0
   m_Name: MapManager
   m_TagString: Untagged
@@ -471,12 +474,37 @@ MonoBehaviour:
   m_Name: 
   m_EditorClassIdentifier: 
   mapPreviewUI: {fileID: 122983027}
-  minDistanceBetweenPoints: 0.05
-  trajectoryColor: {r: 0, g: 1, b: 1, a: 1}
-  trajectoryWidth: 0.02
-  cameraHeight: 10
-  orthographicSize: 5
-  followAnchor: 1
+  minDistanceBetweenPoints: 0.02
+  maxTrajectoryPoints: 500
+  trajectoryStartColor: {r: 0.2, g: 0.5, b: 0.5, a: 1}
+  trajectoryEndColor: {r: 0, g: 1, b: 1, a: 1}
+  currentPosColor: {r: 1, g: 1, b: 0, a: 1}
+  markerSize: 0.15
+  directionColor: {r: 1, g: 0.5, b: 0, a: 1}
+  arrowLength: 0.3
+  cameraHeight: 50
+  fixedOrthoSize: 2
+  followCurrentPos: 1
+  mapLayer: 8
+--- !u!114 &459015947
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 459015944}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: d5aefd84f55456b4492b84ec5a9bc678, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: 
+  showPosition: 1
+  showRotation: 1
+  showEulerAngles: 1
+  updateFrequency: 10
+  fontSize: 14
+  textColor: {r: 1, g: 1, b: 1, a: 1}
+  alignment: 8
 --- !u!1 &539285574
 GameObject:
   m_ObjectHideFlags: 0
@@ -610,7 +638,7 @@ Camera:
   m_Depth: 0
   m_CullingMask:
     serializedVersion: 2
-    m_Bits: 4294967295
+    m_Bits: 4294967039
   m_RenderingPath: -1
   m_TargetTexture: {fileID: 0}
   m_TargetDisplay: 0
@@ -723,7 +751,7 @@ MonoBehaviour:
   m_Name: 
   m_EditorClassIdentifier: 
   m_AspectMode: 0
-  m_AspectRatio: 1
+  m_AspectRatio: 0.9338015
 --- !u!1 &1994433038
 GameObject:
   m_ObjectHideFlags: 0

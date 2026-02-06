@@ -3,6 +3,7 @@
 本项目已移除 ROS 依赖，支持以下平台：
 - **Windows** - Visual Studio 编译，生成 `.exe` 可执行文件
 - **Android** - NDK 交叉编译，生成 `libvo_unity.so` 供 Unity 调用
+- **如果你觉得这个项目对你有用，欢迎点个 Star ⭐ 支持一下！**
 
 ---
 

@@ -427,14 +427,25 @@ namespace SqrtVINS
                     _frameCount++;
                     // Only log periodically to reduce spam
                     if (_frameCount % 100 == 0) Debug.Log($"[VOManager] Processed {_frameCount} frames");
-                    
+
                     VONative.VOPose newPose = new VONative.VOPose();
-                    if (VONative.vo_get_pose(ref newPose) == 0 && newPose.valid != 0)
+                    int poseResult = VONative.vo_get_pose(ref newPose);
+
+                    if (poseResult == 0)
                     {
                         lock (_poseLock)
                         {
                             _currentPose = newPose;
                             _hasNewPose = true;
+                        }
+
+                        // 诊断日志：每30帧记录一次位姿和valid状态
+                        if (_frameCount % 30 == 0)
+                        {
+                            string validStatus = newPose.valid == 0 ? "INVALID(IMU)" : "VALID(PnP)";
+                            Debug.Log($"[VOManager] Frame {_frameCount}: {validStatus}, " +
+                                     $"Pos=({newPose.px:F3}, {newPose.py:F3}, {newPose.pz:F3}), " +
+                                     $"Quat=({newPose.qx:F2}, {newPose.qy:F2}, {newPose.qz:F2}, {newPose.qw:F2})");
                         }
                     }
                 }

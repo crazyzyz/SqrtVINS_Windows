@@ -261,18 +261,19 @@ VOErrorCode VOUnityBridge::getPose(VOPose *out) const {
 
   try {
     Eigen::Matrix4d pose = vo_->getCurrentPose();
+    bool pose_fresh = vo_->isPoseUpdated();
     convertToUnityCoordinates(pose, *out);
 
-    // Update last valid pose if this one is valid
-    if (out->valid) {
+    if (pose_fresh) {
+      // PnP succeeded this frame, use visual pose
       const_cast<VOUnityBridge *>(this)->last_valid_pose_ = *out;
-      // Reset IMU integration when visual tracking succeeds
+      // Reset IMU integration
       const_cast<VOUnityBridge *>(this)->position_delta_ = Eigen::Vector3d::Zero();
       const_cast<VOUnityBridge *>(this)->orientation_delta_ = Eigen::Quaterniond::Identity();
       const_cast<VOUnityBridge *>(this)->velocity_ = Eigen::Vector3d::Zero();
     } else {
-      // Visual tracking failed, use IMU prediction if available
-      if (imu_initialized_ && position_delta_.norm() > 0.0001) {
+      // PnP failed this frame, use IMU prediction
+      if (imu_initialized_) {
         // Apply IMU delta to last valid pose
         out->px = last_valid_pose_.px + static_cast<float>(position_delta_.x());
         out->py = last_valid_pose_.py + static_cast<float>(position_delta_.y());
@@ -554,10 +555,6 @@ VOErrorCode VOUnityBridge::resetImu() {
 
   return VO_SUCCESS;
 }
-
-#include <android/log.h>
-#define LOG_TAG "VOUnityNative"
-#define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
 
 void VOUnityBridge::onRenderEvent(int eventID) {
   // We only support eventID 1 for texture update

@@ -96,6 +96,11 @@ public:
   Eigen::Matrix4d getCurrentPose() const;
 
   /**
+   * @brief Check if pose was updated in the last processFrame call
+   */
+  bool isPoseUpdated() const { return pose_updated_; }
+
+  /**
    * @brief Get the current point cloud
    * @return Vector of 3D points
    */
@@ -140,6 +145,7 @@ private:
   std::unique_ptr<PangolinViewer> viewer_;
 
   bool initialized_ = false;
+  bool pose_updated_ = false;  ///< Whether pose was updated in last processFrame
   Eigen::Matrix4d current_pose_;
   Eigen::Matrix4d last_keyframe_pose_;  ///< Pose of the last keyframe
   int frame_count_ = 0;

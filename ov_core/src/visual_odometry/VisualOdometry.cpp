@@ -17,6 +17,7 @@
 #include "utils/sensor_data.h"
 
 #include <algorithm>
+#include <unordered_map>
 #include <opencv2/imgproc.hpp>
 
 namespace ov_core {
@@ -96,6 +97,9 @@ VisualOdometry::Config VisualOdometry::getDefaultConfig(int image_width, int ima
 
 
 void VisualOdometry::processFrame(const cv::Mat &image, double timestamp) {
+  // Reset pose update flag
+  pose_updated_ = false;
+
   // Convert to grayscale if needed
   cv::Mat gray;
   if (image.channels() == 3) {
@@ -362,10 +366,22 @@ void VisualOdometry::track(const cv::Mat &image) {
   if (pts3d.size() >= 6) {
     auto result = PoseEstimator::solvePnP(pts3d, pts2d, K_, 100);
 
-    if (result.success && result.num_inliers >= 10) {
-      current_pose_ = result.pose;
-      pose_estimated = true;
-      PRINT_DEBUG("[VisualOdometry] PnP succeeded with %d inliers\n", result.num_inliers);
+    float inlier_ratio = pts3d.size() > 0 ? (float)result.num_inliers / pts3d.size() : 0.0f;
+    if (result.success && result.num_inliers >= 10 && inlier_ratio >= 0.3f) {
+      // 帧间位移跳变检测：防止尺度漂移正反馈
+      Eigen::Vector3d prev_t = current_pose_.block<3,1>(0,3);
+      Eigen::Vector3d new_t = result.pose.block<3,1>(0,3);
+      double displacement = (new_t - prev_t).norm();
+
+      if (displacement < 0.3) {
+        current_pose_ = result.pose;
+        pose_estimated = true;
+        pose_updated_ = true;
+        PRINT_DEBUG("[VisualOdometry] PnP OK: %d/%zu inliers (%.1f%%), disp=%.3f\n",
+                    result.num_inliers, pts3d.size(), inlier_ratio * 100, displacement);
+      } else {
+        PRINT_WARNING("[VisualOdometry] PnP rejected: displacement=%.3f > 2.0m\n", displacement);
+      }
     }
   }
 
