@@ -71,6 +71,21 @@ namespace SqrtVINS
             public int status;      // 状态: 0=lost, 1=tracked, 2=new
         }
 
+        /// <summary>
+        /// IMU 测量数据
+        /// </summary>
+        [StructLayout(LayoutKind.Sequential)]
+        public struct VOImuData
+        {
+            public double timestamp;  // 时间戳 (秒)
+            public float ax;          // 加速度计 X (m/s^2)
+            public float ay;          // 加速度计 Y (m/s^2)
+            public float az;          // 加速度计 Z (m/s^2)
+            public float gx;          // 陀螺仪 X (rad/s)
+            public float gy;          // 陀螺仪 Y (rad/s)
+            public float gz;          // 陀螺仪 Z (rad/s)
+        }
+
         #endregion
 
         #region Native Functions
@@ -127,6 +142,18 @@ namespace SqrtVINS
         /// <param name="drawFlow">是否绘制光流线 (绿色线条)</param>
         [DllImport(DLL_NAME, CallingConvention = CallingConvention.Cdecl)]
         public static extern int vo_get_debug_image(IntPtr outputImage, int width, int height, int drawPoints, int drawFlow);
+
+        /// <summary>
+        /// 输入 IMU 测量数据
+        /// </summary>
+        [DllImport(DLL_NAME, CallingConvention = CallingConvention.Cdecl)]
+        public static extern int vo_feed_imu(ref VOImuData imuData);
+
+        /// <summary>
+        /// 重置 IMU 积分状态
+        /// </summary>
+        [DllImport(DLL_NAME, CallingConvention = CallingConvention.Cdecl)]
+        public static extern int vo_reset_imu();
 
         /// <summary>
         /// 重置跟踪

@@ -39,6 +39,11 @@ namespace SqrtVINS
         [SerializeField] private int maxFeatures = 200;
         [SerializeField] private int pyramidLevels = 3;
 
+        [Header("IMU 参数")]
+        [SerializeField] private bool useImu = true;
+        [Tooltip("IMU 数据发送频率 (Hz)")]
+        [SerializeField] private float imuUpdateRate = 100f;
+
         // 目前不使用定时更新，由相机驱动
         // [SerializeField] private bool autoUpdate = true;
         // [SerializeField] private float updateInterval = 0.033f; 
@@ -79,7 +84,11 @@ namespace SqrtVINS
         private ConcurrentQueue<FrameData> _frameQueue;
         private ConcurrentQueue<byte[]> _bufferPool;
         
-        private const int MAX_QUEUE_SIZE = 5; 
+        private const int MAX_QUEUE_SIZE = 5;
+
+        // IMU 相关变量
+        private float _lastImuTime = 0f;
+        private float _imuInterval; 
 
         private struct FrameData
         {
@@ -104,8 +113,19 @@ namespace SqrtVINS
             }
             _instance = this;
             DontDestroyOnLoad(gameObject);
-            
+
             _frameQueue = new ConcurrentQueue<FrameData>();
+
+            // 初始化 IMU 间隔
+            _imuInterval = 1f / imuUpdateRate;
+
+            // 启用陀螺仪
+            if (useImu)
+            {
+                Input.gyro.enabled = true;
+                Debug.Log("[VOManager] Gyroscope enabled");
+            }
+
             _bufferPool = new ConcurrentQueue<byte[]>();
             _workerSignal = new AutoResetEvent(false);
             _cancellationTokenSource = new CancellationTokenSource();
@@ -132,6 +152,12 @@ namespace SqrtVINS
 
         private void Update()
         {
+            // 发送 IMU 数据
+            if (useImu && _currentState == VOState.Running)
+            {
+                SendImuData();
+            }
+
             // 在主线程分发事件
             if (_hasNewPose)
             {
@@ -421,6 +447,37 @@ namespace SqrtVINS
             {
                 handle.Free();
             }
+        }
+
+        /// <summary>
+        /// 发送 IMU 数据到 SO 库
+        /// </summary>
+        private void SendImuData()
+        {
+            float currentTime = Time.time;
+            if (currentTime - _lastImuTime < _imuInterval)
+                return;
+
+            _lastImuTime = currentTime;
+
+            // 获取 Unity 的加速度计和陀螺仪数据
+            Vector3 accel = Input.acceleration;
+            Vector3 gyro = Input.gyro.rotationRateUnbiased;
+
+            // 构造 IMU 数据
+            VONative.VOImuData imuData = new VONative.VOImuData
+            {
+                timestamp = Time.timeAsDouble,
+                ax = accel.x * 9.81f,
+                ay = accel.y * 9.81f,
+                az = accel.z * 9.81f,
+                gx = gyro.x,
+                gy = gyro.y,
+                gz = gyro.z
+            };
+
+            // 发送到 SO 库
+            VONative.vo_feed_imu(ref imuData);
         }
 
         private void SetState(VOState newState)

@@ -43,6 +43,14 @@ VOUnityBridge::VOUnityBridge() : vo_(nullptr), initialized_(false) {
   tracking_params_.grid_x = 5;
   tracking_params_.grid_y = 4;
   tracking_params_.min_px_dist = 20;
+
+  // Initialize IMU state
+  velocity_ = Eigen::Vector3d::Zero();
+  position_delta_ = Eigen::Vector3d::Zero();
+  orientation_delta_ = Eigen::Quaterniond::Identity();
+  last_imu_timestamp_ = -1.0;
+  imu_initialized_ = false;
+  gravity_ = Eigen::Vector3d(0, 0, -9.81);  // Default gravity
 }
 
 VOUnityBridge::~VOUnityBridge() { shutdown(); }
@@ -258,8 +266,33 @@ VOErrorCode VOUnityBridge::getPose(VOPose *out) const {
     // Update last valid pose if this one is valid
     if (out->valid) {
       const_cast<VOUnityBridge *>(this)->last_valid_pose_ = *out;
+      // Reset IMU integration when visual tracking succeeds
+      const_cast<VOUnityBridge *>(this)->position_delta_ = Eigen::Vector3d::Zero();
+      const_cast<VOUnityBridge *>(this)->orientation_delta_ = Eigen::Quaterniond::Identity();
+      const_cast<VOUnityBridge *>(this)->velocity_ = Eigen::Vector3d::Zero();
     } else {
-      // Return last valid pose on failure
+      // Visual tracking failed, use IMU prediction if available
+      if (imu_initialized_ && position_delta_.norm() > 0.0001) {
+        // Apply IMU delta to last valid pose
+        out->px = last_valid_pose_.px + static_cast<float>(position_delta_.x());
+        out->py = last_valid_pose_.py + static_cast<float>(position_delta_.y());
+        out->pz = last_valid_pose_.pz + static_cast<float>(position_delta_.z());
+
+        // Apply orientation delta
+        Eigen::Quaterniond last_q(last_valid_pose_.qw, last_valid_pose_.qx,
+                                   last_valid_pose_.qy, last_valid_pose_.qz);
+        Eigen::Quaterniond new_q = last_q * orientation_delta_;
+        new_q.normalize();
+
+        out->qx = static_cast<float>(new_q.x());
+        out->qy = static_cast<float>(new_q.y());
+        out->qz = static_cast<float>(new_q.z());
+        out->qw = static_cast<float>(new_q.w());
+        out->valid = 1;  // Mark as valid (IMU predicted)
+
+        return VO_SUCCESS;
+      }
+      // No IMU data, return last valid pose
       *out = last_valid_pose_;
       return VO_ERROR_POSE_FAILED;
     }
@@ -455,6 +488,70 @@ VOErrorCode VOUnityBridge::setNativeTexture(void *ptr, int width, int height) {
   native_texture_ptr_ = ptr;
   texture_width_ = width;
   texture_height_ = height;
+  return VO_SUCCESS;
+}
+
+VOErrorCode VOUnityBridge::feedImu(const VOImuData &imu) {
+  std::lock_guard<std::mutex> lock(mutex_);
+
+  if (!initialized_) {
+    return VO_ERROR_NOT_INITIALIZED;
+  }
+
+  // Add to buffer
+  imu_buffer_.push_back(imu);
+  if (imu_buffer_.size() > MAX_IMU_BUFFER_SIZE) {
+    imu_buffer_.pop_front();
+  }
+
+  // Perform IMU integration
+  if (!imu_initialized_) {
+    last_imu_timestamp_ = imu.timestamp;
+    imu_initialized_ = true;
+    return VO_SUCCESS;
+  }
+
+  double dt = imu.timestamp - last_imu_timestamp_;
+  if (dt <= 0 || dt > 0.5) {
+    // Invalid dt, reset
+    last_imu_timestamp_ = imu.timestamp;
+    return VO_SUCCESS;
+  }
+
+  // Get acceleration and angular velocity
+  Eigen::Vector3d accel(imu.ax, imu.ay, imu.az);
+  Eigen::Vector3d gyro(imu.gx, imu.gy, imu.gz);
+
+  // Integrate orientation (simple Euler integration)
+  Eigen::Quaterniond dq;
+  Eigen::Vector3d half_theta = gyro * dt * 0.5;
+  dq.w() = 1.0;
+  dq.x() = half_theta.x();
+  dq.y() = half_theta.y();
+  dq.z() = half_theta.z();
+  dq.normalize();
+  orientation_delta_ = orientation_delta_ * dq;
+  orientation_delta_.normalize();
+
+  // Remove gravity and integrate velocity/position
+  Eigen::Vector3d accel_world = orientation_delta_ * accel + gravity_;
+  velocity_ += accel_world * dt;
+  position_delta_ += velocity_ * dt;
+
+  last_imu_timestamp_ = imu.timestamp;
+  return VO_SUCCESS;
+}
+
+VOErrorCode VOUnityBridge::resetImu() {
+  std::lock_guard<std::mutex> lock(mutex_);
+
+  imu_buffer_.clear();
+  velocity_ = Eigen::Vector3d::Zero();
+  position_delta_ = Eigen::Vector3d::Zero();
+  orientation_delta_ = Eigen::Quaterniond::Identity();
+  last_imu_timestamp_ = -1.0;
+  imu_initialized_ = false;
+
   return VO_SUCCESS;
 }
 

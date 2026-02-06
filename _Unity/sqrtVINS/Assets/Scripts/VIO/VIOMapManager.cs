@@ -126,8 +126,11 @@ namespace SqrtVINS
 
         private void UpdateTrajectory(Vector3 currentPos)
         {
-            
-            AddPoint(currentPos);
+            // 只有当移动距离超过阈值时才添加点（滤波）
+            if (_pathPoints.Count == 0 || Vector3.Distance(currentPos, _lastPoint) >= minDistanceBetweenPoints)
+            {
+                AddPoint(currentPos);
+            }
         }
 
         private void AddPoint(Vector3 point)

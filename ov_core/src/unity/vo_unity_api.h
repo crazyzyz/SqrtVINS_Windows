@@ -88,6 +88,19 @@ typedef struct {
   int valid; ///< 1 if pose is valid, 0 otherwise
 } VOPose;
 
+/**
+ * @brief IMU measurement data
+ */
+typedef struct {
+  double timestamp;  ///< Timestamp in seconds
+  float ax;          ///< Accelerometer X (m/s^2)
+  float ay;          ///< Accelerometer Y (m/s^2)
+  float az;          ///< Accelerometer Z (m/s^2)
+  float gx;          ///< Gyroscope X (rad/s)
+  float gy;          ///< Gyroscope Y (rad/s)
+  float gz;          ///< Gyroscope Z (rad/s)
+} VOImuData;
+
 // ============================================================================
 // Initialization and Shutdown
 // ============================================================================
@@ -179,6 +192,23 @@ VO_API VOErrorCode vo_get_point_cloud(float *points, int max_points,
 VO_API VOErrorCode vo_get_debug_image(unsigned char *output_image, int width,
                                       int height, int draw_points,
                                       int draw_flow);
+
+// ============================================================================
+// IMU Data Input
+// ============================================================================
+
+/**
+ * @brief Feed IMU measurement to the VIO system
+ * @param imu_data IMU measurement data
+ * @return VO_SUCCESS on success, error code otherwise
+ */
+VO_API VOErrorCode vo_feed_imu(const VOImuData *imu_data);
+
+/**
+ * @brief Reset IMU integration state
+ * @return VO_SUCCESS on success, error code otherwise
+ */
+VO_API VOErrorCode vo_reset_imu(void);
 
 // ============================================================================
 // Runtime Configuration

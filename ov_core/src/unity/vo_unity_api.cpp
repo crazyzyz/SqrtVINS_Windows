@@ -146,6 +146,30 @@ VOErrorCode vo_get_debug_image(unsigned char *output_image, int width,
 }
 
 // ============================================================================
+// IMU Data Input
+// ============================================================================
+
+VOErrorCode vo_feed_imu(const VOImuData *imu_data) {
+  if (imu_data == nullptr) {
+    return VO_ERROR_INVALID_PARAM;
+  }
+
+  try {
+    return ov_core::VOUnityBridge::getInstance().feedImu(*imu_data);
+  } catch (...) {
+    return VO_ERROR_INVALID_PARAM;
+  }
+}
+
+VOErrorCode vo_reset_imu(void) {
+  try {
+    return ov_core::VOUnityBridge::getInstance().resetImu();
+  } catch (...) {
+    return VO_ERROR_INVALID_PARAM;
+  }
+}
+
+// ============================================================================
 // Runtime Configuration
 // ============================================================================
 

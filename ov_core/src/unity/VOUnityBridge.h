@@ -8,6 +8,7 @@
 
 #include "vo_unity_api.h"
 
+#include <deque>
 #include <memory>
 #include <mutex>
 #include <unordered_map>
@@ -142,6 +143,16 @@ public:
    */
   void onRenderEvent(int eventID);
 
+  /**
+   * @brief Feed IMU measurement data
+   */
+  VOErrorCode feedImu(const VOImuData &imu);
+
+  /**
+   * @brief Reset IMU integration state
+   */
+  VOErrorCode resetImu();
+
 private:
   VOUnityBridge();
   ~VOUnityBridge();
@@ -179,6 +190,20 @@ private:
   void *native_texture_ptr_ = nullptr;
   int texture_width_ = 0;
   int texture_height_ = 0;
+
+  // IMU data buffer
+  std::deque<VOImuData> imu_buffer_;
+  static constexpr size_t MAX_IMU_BUFFER_SIZE = 500;
+
+  // IMU integration state
+  Eigen::Vector3d velocity_;           // Current velocity estimate
+  Eigen::Vector3d position_delta_;     // Position change from IMU
+  Eigen::Quaterniond orientation_delta_; // Orientation change from IMU
+  double last_imu_timestamp_;
+  bool imu_initialized_;
+
+  // Gravity vector (in sensor frame, will be estimated)
+  Eigen::Vector3d gravity_;
 };
 
 } // namespace ov_core

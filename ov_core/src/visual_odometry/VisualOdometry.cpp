@@ -361,7 +361,7 @@ void VisualOdometry::track(const cv::Mat &image) {
   bool pose_estimated = false;
   if (pts3d.size() >= 6) {
     auto result = PoseEstimator::solvePnP(pts3d, pts2d, K_, 100);
-    
+
     if (result.success && result.num_inliers >= 10) {
       current_pose_ = result.pose;
       pose_estimated = true;
@@ -369,42 +369,7 @@ void VisualOdometry::track(const cv::Mat &image) {
     }
   }
 
-  // Fallback to Essential matrix if PnP fails
-  if (!pose_estimated) {
-    // Collect correspondences from last keyframe to current frame
-    std::vector<Eigen::Vector2d> pts1_pixel, pts2_pixel;
-    
-    for (size_t i = 0; i < last_ids[0].size(); ++i) {
-      size_t feat_id = last_ids[0][i];
-      Feature feat;
-      if (!database->get_feature_clone(feat_id, feat)) {
-        continue;
-      }
-
-      if (feat.timestamps.find(0) == feat.timestamps.end() || feat.timestamps[0].size() < 2) {
-        continue;
-      }
-
-      const auto &uvs = feat.uvs[0];
-      if (uvs.size() < 2) {
-        continue;
-      }
-
-      // Use first and last observations
-      pts1_pixel.push_back(Eigen::Vector2d(uvs[0](0), uvs[0](1)));
-      pts2_pixel.push_back(Eigen::Vector2d(uvs.back()(0), uvs.back()(1)));
-    }
-
-    if (pts1_pixel.size() >= 10) {
-      auto result = PoseEstimator::solveEssential(pts1_pixel, pts2_pixel, K_);
-      if (result.success && result.num_inliers >= 10) {
-        // Essential matrix gives relative pose, need to compose with last keyframe pose
-        current_pose_ = result.pose * last_keyframe_pose_;
-        pose_estimated = true;
-        PRINT_DEBUG("[VisualOdometry] Essential matrix fallback succeeded with %d inliers\n", result.num_inliers);
-      }
-    }
-  }
+  // Essential matrix fallback removed - IMU will handle pose prediction when PnP fails
 
   if (!pose_estimated) {
     PRINT_WARNING("[VisualOdometry] Pose estimation failed, keeping previous pose\n");
