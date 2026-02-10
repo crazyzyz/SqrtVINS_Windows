@@ -30,19 +30,45 @@ namespace SqrtVINS
             }
         }
 
-        [Header("相机参数")]
-        [SerializeField] private float focalLength = 500f;
-        [SerializeField] private int imageWidth = 640;
+        [Header("相机内参 (来自标定)")]
+        [SerializeField] private float focalLengthX = 458.654f;
+        [SerializeField] private float focalLengthY = 457.296f;
+        [SerializeField] private float principalPointX = 367.215f;
+        [SerializeField] private float principalPointY = 248.375f;
+        [SerializeField] private int imageWidth = 752;
         [SerializeField] private int imageHeight = 480;
 
-        [Header("跟踪参数")]
-        [SerializeField] private int maxFeatures = 200;
-        [SerializeField] private int pyramidLevels = 3;
+        [Header("畸变系数 (来自标定)")]
+        [SerializeField] private float distK1 = -0.28340811f;
+        [SerializeField] private float distK2 = 0.07395907f;
+        [SerializeField] private float distP1 = 0.00019359f;
+        [SerializeField] private float distP2 = 1.76187114e-05f;
 
-        [Header("IMU 参数")]
+        [Header("跟踪参数")]
+        [SerializeField] private int maxFeatures = 150;
+        [SerializeField] private int fastThreshold = 20;
+        [SerializeField] private int gridX = 5;
+        [SerializeField] private int gridY = 5;
+        [SerializeField] private int minPxDist = 10;
+
+        [Header("IMU 噪声参数 (来自标定)")]
         [SerializeField] private bool useImu = true;
         [Tooltip("IMU 数据发送频率 (Hz)")]
         [SerializeField] private float imuUpdateRate = 100f;
+        [SerializeField] private float imuNoiseGyro = 2.0897790366737560e-03f;
+        [SerializeField] private float imuGyroWalk = 3.3686475741950929e-05f;
+        [SerializeField] private float imuNoiseAcc = 3.0690310195074056e-02f;
+        [SerializeField] private float imuAccWalk = 9.7833628333635959e-04f;
+        [SerializeField] private float imuFrequency = 100.0f;
+
+        [Header("相机-IMU 外参 T_cam_imu (行优先 4x4)")]
+        [SerializeField] private float[] extrinsicsMatrix = new float[]
+        {
+            0.99996517f, -0.00365568f, -0.00750293f,  0.03606208f,
+           -0.00413672f, -0.99786807f, -0.06513218f, -0.01643879f,
+           -0.00724884f,  0.06516095f, -0.99784844f, -0.02471846f,
+            0f,           0f,           0f,           1f
+        };
 
         // 目前不使用定时更新，由相机驱动
         // [SerializeField] private bool autoUpdate = true;
@@ -152,8 +178,9 @@ namespace SqrtVINS
 
         private void Update()
         {
-            // 发送 IMU 数据
-            if (useImu && _currentState == VOState.Running)
+            // 发送 IMU 数据 - 在 Running 和 Initializing 状态都需要发送
+            // VioManager 需要 IMU 数据来完成初始化
+            if (useImu && (_currentState == VOState.Running || _currentState == VOState.Initializing))
             {
                 SendImuData();
             }
@@ -191,13 +218,16 @@ namespace SqrtVINS
         {
             return InitializeSystem(new VONative.VOCameraParams
             {
-                fx = focalLength,
-                fy = focalLength,
-                cx = imageWidth / 2f,
-                cy = imageHeight / 2f,
+                fx = focalLengthX,
+                fy = focalLengthY,
+                cx = principalPointX,
+                cy = principalPointY,
                 width = imageWidth,
                 height = imageHeight,
-                k1 = 0, k2 = 0, p1 = 0, p2 = 0
+                k1 = distK1,
+                k2 = distK2,
+                p1 = distP1,
+                p2 = distP2
             });
         }
 
@@ -217,24 +247,55 @@ namespace SqrtVINS
             // Sync internal state
             imageWidth = cameraParams.width;
             imageHeight = cameraParams.height;
-            focalLength = cameraParams.fx;
+            focalLengthX = cameraParams.fx;
+            focalLengthY = cameraParams.fy;
+            principalPointX = cameraParams.cx;
+            principalPointY = cameraParams.cy;
 
             SetState(VOState.Initializing);
 
+            // 构建跟踪参数
             VONative.VOTrackingParams trackingParams = new VONative.VOTrackingParams
             {
                 maxFeatures = maxFeatures,
-                pyramidLevels = pyramidLevels,
-                fastThreshold = 20,
-                minDistance = 20f
+                fastThreshold = fastThreshold,
+                gridX = gridX,
+                gridY = gridY,
+                minPxDist = minPxDist
             };
 
+            // 构建 IMU 噪声参数
+            VONative.VOImuParams imuParams = new VONative.VOImuParams
+            {
+                noiseGyro = imuNoiseGyro,
+                gyroWalk = imuGyroWalk,
+                noiseAcc = imuNoiseAcc,
+                accWalk = imuAccWalk,
+                frequency = imuFrequency
+            };
+
+            // 构建外参
+            VONative.VOExtrinsics ext = new VONative.VOExtrinsics();
+            ext.T_cam_imu = new float[16];
+            if (extrinsicsMatrix != null && extrinsicsMatrix.Length == 16)
+            {
+                Array.Copy(extrinsicsMatrix, ext.T_cam_imu, 16);
+            }
+            else
+            {
+                // 默认 Identity
+                ext.T_cam_imu[0] = 1; ext.T_cam_imu[5] = 1;
+                ext.T_cam_imu[10] = 1; ext.T_cam_imu[15] = 1;
+            }
+
             int result;
-            IntPtr ptr = Marshal.AllocHGlobal(Marshal.SizeOf(trackingParams));
             try
             {
-                Marshal.StructureToPtr(trackingParams, ptr, false);
-                result = VONative.vo_initialize(ref cameraParams, ptr);
+                result = VONative.vo_initialize(
+                    ref cameraParams,
+                    ref imuParams,
+                    ref ext,
+                    ref trackingParams);
             }
             catch (Exception e)
             {
@@ -242,15 +303,13 @@ namespace SqrtVINS
                 SetState(VOState.Error);
                 return false;
             }
-            finally
-            {
-                Marshal.FreeHGlobal(ptr);
-            }
 
             if (result == 0)
             {
+                // VioManager 创建成功，但 VIO 状态尚未初始化
+                // 需要等待足够的 IMU 数据和相机帧后自动初始化
                 SetState(VOState.Running);
-                Debug.Log("[VOManager] VIO initialized successfully");
+                Debug.Log("[VOManager] VIO system created, waiting for initialization...");
                 StartWorker();
                 return true;
             }
@@ -270,7 +329,7 @@ namespace SqrtVINS
         /// </summary>
         public bool ProcessFrame(byte[] imageData, int width, int height, int channels, double timestamp)
         {
-            if (_currentState != VOState.Running && _currentState != VOState.Lost) return false;
+            if (_currentState != VOState.Running && _currentState != VOState.Lost && _currentState != VOState.Initializing) return false;
 
             // Simple backpressure
             if (_frameQueue.Count >= MAX_QUEUE_SIZE)
@@ -309,12 +368,13 @@ namespace SqrtVINS
         public void Reset()
         {
             if (_currentState == VOState.Uninitialized) return;
-            
+
             try
             {
-                VONative.vo_reset();
-                SetState(VOState.Running);
-                Debug.Log("[VOManager] VIO reset");
+                // VioManager 不支持单独 reset，需要 shutdown 后重新初始化
+                Shutdown();
+                Initialize();
+                Debug.Log("[VOManager] VIO reset via re-initialization");
             }
             catch (Exception e)
             {
@@ -442,7 +502,7 @@ namespace SqrtVINS
                         // 诊断日志：每30帧记录一次位姿和valid状态
                         if (_frameCount % 30 == 0)
                         {
-                            string validStatus = newPose.valid == 0 ? "INVALID(IMU)" : "VALID(PnP)";
+                            string validStatus = newPose.valid == 0 ? "NOT_INIT" : "TRACKING";
                             Debug.Log($"[VOManager] Frame {_frameCount}: {validStatus}, " +
                                      $"Pos=({newPose.px:F3}, {newPose.py:F3}, {newPose.pz:F3}), " +
                                      $"Quat=({newPose.qx:F2}, {newPose.qy:F2}, {newPose.qz:F2}, {newPose.qw:F2})");

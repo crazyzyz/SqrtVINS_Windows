@@ -1,6 +1,6 @@
 /**
  * @file VOUnityBridge.h
- * @brief Bridge class connecting Unity C API to VisualOdometry core
+ * @brief Bridge class connecting Unity C API to full VIO (VioManager MSCKF)
  */
 
 #ifndef VO_UNITY_BRIDGE_H
@@ -8,7 +8,6 @@
 
 #include "vo_unity_api.h"
 
-#include <deque>
 #include <memory>
 #include <mutex>
 #include <unordered_map>
@@ -17,140 +16,65 @@
 #include <Eigen/Dense>
 #include <opencv2/core.hpp>
 
-namespace ov_core {
-
 // Forward declarations
-class VisualOdometry;
-class TrackBase;
+namespace ov_srvins {
+class VioManager;
+struct VioManagerOptions;
+} // namespace ov_srvins
 
 /**
- * @brief Singleton bridge class for Unity integration
+ * @brief Singleton bridge class for Unity integration with full MSCKF VIO
  *
- * This class manages the lifecycle of the VisualOdometry system and provides
+ * This class manages the lifecycle of the VioManager (MSCKF) system and provides
  * thread-safe access to its functionality through the C API.
  */
 class VOUnityBridge {
 public:
-  /**
-   * @brief Get the singleton instance
-   * @return Reference to the singleton instance
-   */
   static VOUnityBridge &getInstance();
 
-  // Delete copy/move constructors and assignment operators
   VOUnityBridge(const VOUnityBridge &) = delete;
   VOUnityBridge &operator=(const VOUnityBridge &) = delete;
   VOUnityBridge(VOUnityBridge &&) = delete;
   VOUnityBridge &operator=(VOUnityBridge &&) = delete;
 
   /**
-   * @brief Initialize the VO system
-   * @param camera Camera intrinsic parameters
-   * @param tracking Tracking parameters (can be nullptr for defaults)
-   * @return Error code
+   * @brief Initialize the full VIO system
    */
   VOErrorCode initialize(const VOCameraParams &camera,
+                         const VOImuParams *imu_params,
+                         const VOExtrinsics *extrinsics,
                          const VOTrackingParams *tracking);
 
-  /**
-   * @brief Shutdown the VO system and release resources
-   * @return Error code
-   */
   VOErrorCode shutdown();
-
-  /**
-   * @brief Check if the system is initialized
-   * @return true if initialized
-   */
   bool isInitialized() const;
 
   /**
-   * @brief Process a new camera frame
-   * @param data Image pixel data
-   * @param width Image width
-   * @param height Image height
-   * @param channels Number of channels (1 or 4)
-   * @param timestamp Frame timestamp
-   * @return Error code
+   * @brief Process a new camera frame through the VIO pipeline
    */
   VOErrorCode processFrame(const uint8_t *data, int width, int height,
                            int channels, double timestamp);
 
   /**
-   * @brief Get the number of tracked features
-   * @return Feature count, or -1 if not initialized
-   */
-  int getFeatureCount() const;
-
-  /**
-   * @brief Get tracked feature data
-   * @param out Output array
-   * @param maxCount Maximum features to retrieve
-   * @param outCount Actual count retrieved
-   * @return Error code
-   */
-  VOErrorCode getFeatures(VOFeature *out, int maxCount, int *outCount) const;
-
-  /**
-   * @brief Get the current camera pose
-   * @param out Output pose structure
-   * @return Error code
-   */
-  VOErrorCode getPose(VOPose *out) const;
-
-  /**
-   * @brief Get the 3D point cloud
-   * @param out Output array for points (x,y,z triplets)
-   * @param maxPoints Maximum points to retrieve
-   * @param outCount Actual count retrieved
-   * @return Error code
-   */
-  VOErrorCode getPointCloud(float *out, int maxPoints, int *outCount) const;
-
-  /**
-   * @brief Set maximum feature count
-   * @param count New maximum (must be > 0)
-   * @return Error code
-   */
-  VOErrorCode setMaxFeatures(int count);
-
-  /**
-   * @brief Set FAST detector threshold
-   * @param threshold New threshold (must be > 0)
-   * @return Error code
-   */
-  VOErrorCode setFastThreshold(int threshold);
-
-  /**
-   * @brief Get debug image with features and optical flow drawn
-   * @param out Output RGBA buffer
-   * @param width Image width
-   * @param height Image height
-   * @param drawPoints Draw feature points
-   * @param drawFlow Draw optical flow lines
-   * @return Error code
-   */
-  VOErrorCode getDebugImage(uint8_t *out, int width, int height,
-                            bool drawPoints, bool drawFlow) const;
-
-  /**
-   * @brief Set native texture pointer (e.g., OpenGL texture ID)
-   */
-  VOErrorCode setNativeTexture(void *ptr, int width, int height);
-
-  /**
-   * @brief Handle Unity rendering event
-   */
-  void onRenderEvent(int eventID);
-
-  /**
-   * @brief Feed IMU measurement data
+   * @brief Feed IMU measurement to VioManager
    */
   VOErrorCode feedImu(const VOImuData &imu);
 
   /**
-   * @brief Reset IMU integration state
+   * @brief Get current pose from VioManager state
    */
+  VOErrorCode getPose(VOPose *out) const;
+
+  int getFeatureCount() const;
+  VOErrorCode getFeatures(VOFeature *out, int maxCount, int *outCount) const;
+  VOErrorCode getPointCloud(float *out, int maxPoints, int *outCount) const;
+  VOErrorCode setMaxFeatures(int count);
+  VOErrorCode setFastThreshold(int threshold);
+
+  VOErrorCode getDebugImage(uint8_t *out, int width, int height,
+                            bool drawPoints, bool drawFlow) const;
+
+  VOErrorCode setNativeTexture(void *ptr, int width, int height);
+  void onRenderEvent(int eventID);
   VOErrorCode resetImu();
 
 private:
@@ -158,24 +82,21 @@ private:
   ~VOUnityBridge();
 
   /**
-   * @brief Convert OpenCV pose to Unity coordinate system
+   * @brief Convert VIO state pose (q_GtoI, p_IinG) to Unity coordinates
    *
-   * OpenCV: Right-handed, X-right, Y-down, Z-forward
-   * Unity: Left-handed, X-right, Y-up, Z-forward
-   *
-   * @param pose 4x4 transformation matrix in OpenCV coordinates
-   * @param out Output pose in Unity coordinates
+   * sqrtVINS uses: right-handed, Z-up or Z-forward depending on context
+   * Unity uses: left-handed, Y-up
    */
-  void convertToUnityCoordinates(const Eigen::Matrix4d &pose,
+  void convertToUnityCoordinates(const Eigen::Vector3d &p_IinG,
+                                 const Eigen::Matrix3d &R_GtoI,
                                  VOPose &out) const;
 
-  std::unique_ptr<VisualOdometry> vo_;
+  std::shared_ptr<ov_srvins::VioManager> vio_manager_;
   mutable std::mutex mutex_;
   bool initialized_;
 
   // Cached parameters
   VOCameraParams camera_params_;
-  VOTrackingParams tracking_params_;
 
   // Last valid pose for fallback
   VOPose last_valid_pose_;
@@ -191,21 +112,8 @@ private:
   int texture_width_ = 0;
   int texture_height_ = 0;
 
-  // IMU data buffer
-  std::deque<VOImuData> imu_buffer_;
-  static constexpr size_t MAX_IMU_BUFFER_SIZE = 500;
-
-  // IMU integration state
-  Eigen::Vector3d velocity_;           // Current velocity estimate
-  Eigen::Vector3d position_delta_;     // Position change from IMU
-  Eigen::Quaterniond orientation_delta_; // Orientation change from IMU
-  double last_imu_timestamp_;
-  bool imu_initialized_;
-
-  // Gravity vector (in sensor frame, will be estimated)
-  Eigen::Vector3d gravity_;
+  // Frame counter for logging
+  int frame_count_ = 0;
 };
-
-} // namespace ov_core
 
 #endif // VO_UNITY_BRIDGE_H

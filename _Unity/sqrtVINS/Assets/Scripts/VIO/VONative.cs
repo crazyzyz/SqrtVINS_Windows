@@ -5,7 +5,8 @@ using UnityEngine;
 namespace SqrtVINS
 {
     /// <summary>
-    /// VO 原生接口包装类 - 封装 libvo_unity.so 的 P/Invoke 调用
+    /// VIO 原生接口包装类 - 封装 libvo_unity.so 的 P/Invoke 调用
+    /// 版本 2.0: 使用完整 MSCKF VIO (VioManager)
     /// </summary>
     public static class VONative
     {
@@ -42,9 +43,33 @@ namespace SqrtVINS
         public struct VOTrackingParams
         {
             public int maxFeatures;       // 最大特征点数
-            public int pyramidLevels;     // 金字塔层数
             public int fastThreshold;     // FAST 阈值
-            public float minDistance;      // 特征点最小间距
+            public int gridX;             // 特征提取网格列数
+            public int gridY;             // 特征提取网格行数
+            public int minPxDist;         // 特征点最小像素间距
+        }
+
+        /// <summary>
+        /// IMU 噪声参数 (来自标定)
+        /// </summary>
+        [StructLayout(LayoutKind.Sequential)]
+        public struct VOImuParams
+        {
+            public float noiseGyro;       // 陀螺仪白噪声密度 (rad/s/sqrt(Hz))
+            public float gyroWalk;        // 陀螺仪随机游走 (rad/s^2/sqrt(Hz))
+            public float noiseAcc;        // 加速度计白噪声密度 (m/s^2/sqrt(Hz))
+            public float accWalk;         // 加速度计随机游走 (m/s^3/sqrt(Hz))
+            public float frequency;       // IMU 采样频率 (Hz)
+        }
+
+        /// <summary>
+        /// 相机-IMU 外参
+        /// </summary>
+        [StructLayout(LayoutKind.Sequential)]
+        public struct VOExtrinsics
+        {
+            [MarshalAs(UnmanagedType.ByValArray, SizeConst = 16)]
+            public float[] T_cam_imu;     // 4x4 变换矩阵 (行优先): 相机到IMU
         }
 
         /// <summary>
@@ -56,7 +81,6 @@ namespace SqrtVINS
             public float px, py, pz;      // 位置 (米)
             public float qx, qy, qz, qw;  // 四元数旋转
             public int valid;             // 是否有效
-            public int trackingState;     // 跟踪状态
         }
 
         /// <summary>
@@ -91,13 +115,27 @@ namespace SqrtVINS
         #region Native Functions
 
         /// <summary>
-        /// 初始化 VO 系统
+        /// 初始化完整 VIO 系统 (MSCKF)
         /// </summary>
         [DllImport(DLL_NAME, CallingConvention = CallingConvention.Cdecl)]
-        public static extern int vo_initialize(ref VOCameraParams camera, IntPtr tracking);
+        public static extern int vo_initialize(
+            ref VOCameraParams camera,
+            ref VOImuParams imuParams,
+            ref VOExtrinsics extrinsics,
+            ref VOTrackingParams tracking);
 
         /// <summary>
-        /// 关闭 VO 系统
+        /// 初始化 VIO 系统 (仅相机参数，其他使用默认值)
+        /// </summary>
+        [DllImport(DLL_NAME, CallingConvention = CallingConvention.Cdecl)]
+        public static extern int vo_initialize(
+            ref VOCameraParams camera,
+            IntPtr imuParams,
+            IntPtr extrinsics,
+            IntPtr tracking);
+
+        /// <summary>
+        /// 关闭 VIO 系统
         /// </summary>
         [DllImport(DLL_NAME, CallingConvention = CallingConvention.Cdecl)]
         public static extern int vo_shutdown();
@@ -133,13 +171,8 @@ namespace SqrtVINS
         public static extern int vo_get_point_cloud(IntPtr buffer, int maxPoints, ref int actualPoints);
 
         /// <summary>
-        /// 获取带有特征点和光流绘制的调试图像
+        /// 获取调试图像
         /// </summary>
-        /// <param name="outputImage">输出 RGBA 图像缓冲区 (必须为 width*height*4 字节)</param>
-        /// <param name="width">图像宽度</param>
-        /// <param name="height">图像高度</param>
-        /// <param name="drawPoints">是否绘制特征点 (红色圆点)</param>
-        /// <param name="drawFlow">是否绘制光流线 (绿色线条)</param>
         [DllImport(DLL_NAME, CallingConvention = CallingConvention.Cdecl)]
         public static extern int vo_get_debug_image(IntPtr outputImage, int width, int height, int drawPoints, int drawFlow);
 
@@ -156,14 +189,7 @@ namespace SqrtVINS
         public static extern int vo_reset_imu();
 
         /// <summary>
-        /// 重置跟踪
-        /// </summary>
-        [DllImport(DLL_NAME, CallingConvention = CallingConvention.Cdecl)]
-        public static extern int vo_reset();
-
-        /// <summary>
-        /// 获取版本号 (这里的签名可能需要修正，原生是 void vo_get_version(int*, int*, int*))
-        /// 原来的 vo_get_version 是 (IntPtr, int) 可能是错误的，不过我们先加上新的函数
+        /// 获取版本号
         /// </summary>
         [DllImport(DLL_NAME, CallingConvention = CallingConvention.Cdecl)]
         public static extern void vo_get_version(ref int major, ref int minor, ref int patch);
@@ -180,29 +206,22 @@ namespace SqrtVINS
         [DllImport(DLL_NAME, CallingConvention = CallingConvention.Cdecl)]
         public static extern int vo_set_native_texture(IntPtr texturePtr, int width, int height);
 
-
         #endregion
 
         #region Helper Methods
 
         /// <summary>
         /// 将 VOPose 转换为 Unity 的 Pose
+        /// 注意: 坐标系转换已在 C++ 层完成，这里直接使用
         /// </summary>
         public static Pose ToUnityPose(VOPose voPose)
         {
-            // VIO 使用右手坐标系 (通常 Z 轴朝上)，Unity 使用左手坐标系 (Y 轴朝上)
-            // 1. 基础转换：右手转左手 (翻转 X 轴)
-            Vector3 rawPos = new Vector3(-voPose.px, voPose.py, voPose.pz);
-            // 修复：翻滚方向反了 -> 取反 Quaternion 的 Z 分量
-            // 原: Quaternion rawRot = new Quaternion(-voPose.qx, voPose.qy, voPose.qz, -voPose.qw);
-            // 新: Z 取反 (同时注意实部 w 的符号通常不需要变，但为了保持共轭关系，我们直接反转 Z 轴旋转分量)
-            Quaternion rawRot = new Quaternion(-voPose.qx, voPose.qy, -voPose.qz, -voPose.qw);
-            
-            // 2. 坐标系对齐：将 VIO 的 Z 轴向上对齐到 Unity 的 Y 轴向上
-            // 这通常需要绕 X 轴旋转 90 度
-            Quaternion fix = Quaternion.Euler(90, 0, 0);
-            
-            return new Pose(fix * rawPos, fix * rawRot);
+            // C++ 层已经完成了 VIO->Unity 的坐标转换:
+            // 位置: (VIO_X, VIO_Z, VIO_Y) 映射到 Unity (X, Y-up, Z-forward)
+            // 旋转: 通过变换矩阵 T 完成了右手->左手+轴置换的转换
+            Vector3 pos = new Vector3(voPose.px, voPose.py, voPose.pz);
+            Quaternion rot = new Quaternion(voPose.qx, voPose.qy, voPose.qz, voPose.qw);
+            return new Pose(pos, rot);
         }
 
         /// <summary>
@@ -212,14 +231,42 @@ namespace SqrtVINS
         {
             return new VOCameraParams
             {
-                fx = width * 0.8f,   // 估计焦距
+                fx = width * 0.8f,
                 fy = width * 0.8f,
                 cx = width / 2f,
                 cy = height / 2f,
                 width = width,
                 height = height,
-                k1 = 0, k2 = 0, p1 = 0, p2 = 0  // 无畸变
+                k1 = 0, k2 = 0, p1 = 0, p2 = 0
             };
+        }
+
+        /// <summary>
+        /// 创建默认 IMU 噪声参数
+        /// </summary>
+        public static VOImuParams CreateDefaultImuParams()
+        {
+            return new VOImuParams
+            {
+                noiseGyro = 2.0897790366737560e-03f,
+                gyroWalk = 3.3686475741950929e-05f,
+                noiseAcc = 3.0690310195074056e-02f,
+                accWalk = 9.7833628333635959e-04f,
+                frequency = 100.0f
+            };
+        }
+
+        /// <summary>
+        /// 创建默认外参 (相机与IMU对齐)
+        /// </summary>
+        public static VOExtrinsics CreateIdentityExtrinsics()
+        {
+            var ext = new VOExtrinsics();
+            ext.T_cam_imu = new float[16];
+            // Identity matrix (row-major)
+            ext.T_cam_imu[0] = 1; ext.T_cam_imu[5] = 1;
+            ext.T_cam_imu[10] = 1; ext.T_cam_imu[15] = 1;
+            return ext;
         }
 
         /// <summary>
@@ -228,7 +275,7 @@ namespace SqrtVINS
         public static string GetVersionString()
         {
             int major = 0, minor = 0, patch = 0;
-            try 
+            try
             {
                 vo_get_version(ref major, ref minor, ref patch);
                 return $"{major}.{minor}.{patch}";

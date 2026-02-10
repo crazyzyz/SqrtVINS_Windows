@@ -9,8 +9,8 @@
 #include <cstring>
 
 // Version information
-#define VO_VERSION_MAJOR 1
-#define VO_VERSION_MINOR 1
+#define VO_VERSION_MAJOR 2
+#define VO_VERSION_MINOR 0
 #define VO_VERSION_PATCH 0
 
 #if defined(__CYGWIN32__) || defined(WIN32) || defined(_WIN32) ||              \
@@ -22,7 +22,7 @@
 
 // Static callback function that strictly matches Unity's signature
 static void UNITY_INTERFACE_API OnRenderEvent(int eventID) {
-  ov_core::VOUnityBridge::getInstance().onRenderEvent(eventID);
+  VOUnityBridge::getInstance().onRenderEvent(eventID);
 }
 
 // ============================================================================
@@ -30,14 +30,18 @@ static void UNITY_INTERFACE_API OnRenderEvent(int eventID) {
 // ============================================================================
 
 VOErrorCode vo_initialize(const VOCameraParams *camera_params,
+                          const VOImuParams *imu_params,
+                          const VOExtrinsics *extrinsics,
                           const VOTrackingParams *tracking_params) {
   if (camera_params == nullptr) {
     return VO_ERROR_INVALID_PARAM;
   }
 
   try {
-    return ov_core::VOUnityBridge::getInstance().initialize(*camera_params,
-                                                            tracking_params);
+    return VOUnityBridge::getInstance().initialize(*camera_params,
+                                                   imu_params,
+                                                   extrinsics,
+                                                   tracking_params);
   } catch (...) {
     return VO_ERROR_INVALID_PARAM;
   }
@@ -45,7 +49,7 @@ VOErrorCode vo_initialize(const VOCameraParams *camera_params,
 
 VOErrorCode vo_shutdown(void) {
   try {
-    return ov_core::VOUnityBridge::getInstance().shutdown();
+    return VOUnityBridge::getInstance().shutdown();
   } catch (...) {
     return VO_SUCCESS; // Shutdown should not fail
   }
@@ -53,7 +57,7 @@ VOErrorCode vo_shutdown(void) {
 
 int vo_is_initialized(void) {
   try {
-    return ov_core::VOUnityBridge::getInstance().isInitialized() ? 1 : 0;
+    return VOUnityBridge::getInstance().isInitialized() ? 1 : 0;
   } catch (...) {
     return 0;
   }
@@ -70,7 +74,7 @@ VOErrorCode vo_process_frame(const unsigned char *image_data, int width,
   }
 
   try {
-    return ov_core::VOUnityBridge::getInstance().processFrame(
+    return VOUnityBridge::getInstance().processFrame(
         image_data, width, height, channels, timestamp);
   } catch (...) {
     return VO_ERROR_TRACKING_FAILED;
@@ -83,7 +87,7 @@ VOErrorCode vo_process_frame(const unsigned char *image_data, int width,
 
 int vo_get_feature_count(void) {
   try {
-    return ov_core::VOUnityBridge::getInstance().getFeatureCount();
+    return VOUnityBridge::getInstance().getFeatureCount();
   } catch (...) {
     return -1;
   }
@@ -96,7 +100,7 @@ VOErrorCode vo_get_features(VOFeature *features, int max_count,
   }
 
   try {
-    return ov_core::VOUnityBridge::getInstance().getFeatures(
+    return VOUnityBridge::getInstance().getFeatures(
         features, max_count, out_count);
   } catch (...) {
     *out_count = 0;
@@ -110,7 +114,7 @@ VOErrorCode vo_get_pose(VOPose *pose) {
   }
 
   try {
-    return ov_core::VOUnityBridge::getInstance().getPose(pose);
+    return VOUnityBridge::getInstance().getPose(pose);
   } catch (...) {
     std::memset(pose, 0, sizeof(VOPose));
     return VO_ERROR_POSE_FAILED;
@@ -123,7 +127,7 @@ VOErrorCode vo_get_point_cloud(float *points, int max_points, int *out_count) {
   }
 
   try {
-    return ov_core::VOUnityBridge::getInstance().getPointCloud(
+    return VOUnityBridge::getInstance().getPointCloud(
         points, max_points, out_count);
   } catch (...) {
     *out_count = 0;
@@ -138,7 +142,7 @@ VOErrorCode vo_get_debug_image(unsigned char *output_image, int width,
   }
 
   try {
-    return ov_core::VOUnityBridge::getInstance().getDebugImage(
+    return VOUnityBridge::getInstance().getDebugImage(
         output_image, width, height, draw_points != 0, draw_flow != 0);
   } catch (...) {
     return VO_ERROR_TRACKING_FAILED;
@@ -155,7 +159,7 @@ VOErrorCode vo_feed_imu(const VOImuData *imu_data) {
   }
 
   try {
-    return ov_core::VOUnityBridge::getInstance().feedImu(*imu_data);
+    return VOUnityBridge::getInstance().feedImu(*imu_data);
   } catch (...) {
     return VO_ERROR_INVALID_PARAM;
   }
@@ -163,7 +167,7 @@ VOErrorCode vo_feed_imu(const VOImuData *imu_data) {
 
 VOErrorCode vo_reset_imu(void) {
   try {
-    return ov_core::VOUnityBridge::getInstance().resetImu();
+    return VOUnityBridge::getInstance().resetImu();
   } catch (...) {
     return VO_ERROR_INVALID_PARAM;
   }
@@ -175,7 +179,7 @@ VOErrorCode vo_reset_imu(void) {
 
 VOErrorCode vo_set_max_features(int count) {
   try {
-    return ov_core::VOUnityBridge::getInstance().setMaxFeatures(count);
+    return VOUnityBridge::getInstance().setMaxFeatures(count);
   } catch (...) {
     return VO_ERROR_INVALID_PARAM;
   }
@@ -183,7 +187,7 @@ VOErrorCode vo_set_max_features(int count) {
 
 VOErrorCode vo_set_fast_threshold(int threshold) {
   try {
-    return ov_core::VOUnityBridge::getInstance().setFastThreshold(threshold);
+    return VOUnityBridge::getInstance().setFastThreshold(threshold);
   } catch (...) {
     return VO_ERROR_INVALID_PARAM;
   }
@@ -235,7 +239,7 @@ VO_API UnityRenderEventCallback vo_get_render_event_func(void) {
 
 VO_API VOErrorCode vo_set_native_texture(void *texture_ptr, int width,
                                          int height) {
-  return ov_core::VOUnityBridge::getInstance().setNativeTexture(texture_ptr,
+  return VOUnityBridge::getInstance().setNativeTexture(texture_ptr,
                                                                 width, height);
 }
 

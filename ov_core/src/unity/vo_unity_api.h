@@ -101,17 +101,39 @@ typedef struct {
   float gz;          ///< Gyroscope Z (rad/s)
 } VOImuData;
 
+/**
+ * @brief IMU noise parameters (from calibration)
+ */
+typedef struct {
+  float noise_gyro;   ///< Gyroscope white noise density (rad/s/sqrt(Hz))
+  float gyro_walk;    ///< Gyroscope random walk (rad/s^2/sqrt(Hz))
+  float noise_acc;    ///< Accelerometer white noise density (m/s^2/sqrt(Hz))
+  float acc_walk;     ///< Accelerometer random walk (m/s^3/sqrt(Hz))
+  float frequency;    ///< IMU sampling frequency (Hz)
+} VOImuParams;
+
+/**
+ * @brief Camera-IMU extrinsic parameters
+ */
+typedef struct {
+  float T_cam_imu[16]; ///< 4x4 transform matrix (row-major): camera to IMU body
+} VOExtrinsics;
+
 // ============================================================================
 // Initialization and Shutdown
 // ============================================================================
 
 /**
- * @brief Initialize the VO library with camera and tracking parameters
+ * @brief Initialize the full VIO system
  * @param camera_params Camera intrinsic parameters
+ * @param imu_params IMU noise parameters (can be NULL for defaults)
+ * @param extrinsics Camera-IMU extrinsics (can be NULL for identity)
  * @param tracking_params Feature tracking parameters (can be NULL for defaults)
  * @return VO_SUCCESS on success, error code otherwise
  */
 VO_API VOErrorCode vo_initialize(const VOCameraParams *camera_params,
+                                 const VOImuParams *imu_params,
+                                 const VOExtrinsics *extrinsics,
                                  const VOTrackingParams *tracking_params);
 
 /**

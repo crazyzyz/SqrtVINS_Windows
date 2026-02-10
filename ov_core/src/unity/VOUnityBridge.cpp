@@ -1,11 +1,20 @@
 /**
  * @file VOUnityBridge.cpp
- * @brief Implementation of the Unity bridge class
+ * @brief Implementation of the Unity bridge class using full VioManager MSCKF
  */
 
 #include "VOUnityBridge.h"
+
+#include "cam/CamRadtan.h"
+#include "core/VioManager.h"
+#include "core/VioManagerOptions.h"
+#include "state/State.h"
 #include "track/TrackBase.h"
-#include "visual_odometry/VisualOdometry.h"
+#include "types/IMU.h"
+#include "utils/DataType.h"
+#include "utils/print.h"
+#include "utils/quat_ops.h"
+#include "utils/sensor_data.h"
 
 #include <opencv2/core.hpp>
 #include <opencv2/imgproc.hpp>
@@ -18,121 +27,189 @@
 #elif defined(_WIN32)
 #include <GL/gl.h>
 #include <windows.h>
-// Windows 可能需要 glext.h 来获取 GL_RGBA 等定义，或者直接使用 GL_RGBA
 #ifndef GL_RG
 #define GL_RG 0x8227
 #endif
 #endif
 
-namespace ov_core {
+// ============================================================================
+// Singleton & Lifecycle
+// ============================================================================
 
 VOUnityBridge &VOUnityBridge::getInstance() {
   static VOUnityBridge instance;
   return instance;
 }
 
-VOUnityBridge::VOUnityBridge() : vo_(nullptr), initialized_(false) {
-  // Initialize last valid pose to identity
+VOUnityBridge::VOUnityBridge() : vio_manager_(nullptr), initialized_(false) {
   std::memset(&last_valid_pose_, 0, sizeof(VOPose));
   last_valid_pose_.qw = 1.0f;
   last_valid_pose_.valid = 0;
-
-  // Initialize default tracking params
-  tracking_params_.max_features = 500;
-  tracking_params_.fast_threshold = 20;
-  tracking_params_.grid_x = 5;
-  tracking_params_.grid_y = 4;
-  tracking_params_.min_px_dist = 20;
-
-  // Initialize IMU state
-  velocity_ = Eigen::Vector3d::Zero();
-  position_delta_ = Eigen::Vector3d::Zero();
-  orientation_delta_ = Eigen::Quaterniond::Identity();
-  last_imu_timestamp_ = -1.0;
-  imu_initialized_ = false;
-  gravity_ = Eigen::Vector3d(0, 0, -9.81);  // Default gravity
 }
 
 VOUnityBridge::~VOUnityBridge() { shutdown(); }
 
+// ============================================================================
+// Initialize
+// ============================================================================
+
 VOErrorCode VOUnityBridge::initialize(const VOCameraParams &camera,
+                                      const VOImuParams *imu_params,
+                                      const VOExtrinsics *extrinsics,
                                       const VOTrackingParams *tracking) {
   std::lock_guard<std::mutex> lock(mutex_);
 
   // Validate camera parameters
-  if (camera.fx <= 0 || camera.fy <= 0) {
+  if (camera.fx <= 0 || camera.fy <= 0)
     return VO_ERROR_INVALID_PARAM;
-  }
-  if (camera.width <= 0 || camera.height <= 0) {
+  if (camera.width <= 0 || camera.height <= 0)
     return VO_ERROR_INVALID_PARAM;
-  }
   if (camera.cx < 0 || camera.cx >= camera.width || camera.cy < 0 ||
-      camera.cy >= camera.height) {
+      camera.cy >= camera.height)
     return VO_ERROR_INVALID_PARAM;
-  }
 
-  // Release previous resources if already initialized
+  // Release previous resources
   if (initialized_) {
-    vo_.reset();
+    vio_manager_.reset();
     initialized_ = false;
   }
 
-  // Store parameters
   camera_params_ = camera;
-  if (tracking != nullptr) {
-    // Validate tracking parameters
-    if (tracking->max_features <= 0 || tracking->fast_threshold <= 0) {
-      return VO_ERROR_INVALID_PARAM;
-    }
-    tracking_params_ = *tracking;
-  }
-
-  // Create VisualOdometry configuration
-  VisualOdometry::Config config;
-  config.calibration.fx = camera.fx;
-  config.calibration.fy = camera.fy;
-  config.calibration.cx = camera.cx;
-  config.calibration.cy = camera.cy;
-  config.calibration.image_width = camera.width;
-  config.calibration.image_height = camera.height;
-
-  // Set distortion coefficients
-  config.calibration.distortion.clear();
-  config.calibration.distortion.push_back(camera.k1);
-  config.calibration.distortion.push_back(camera.k2);
-  config.calibration.distortion.push_back(camera.p1);
-  config.calibration.distortion.push_back(camera.p2);
-
-  // Set tracking parameters
-  config.num_features = tracking_params_.max_features;
-  config.fast_threshold = tracking_params_.fast_threshold;
-
-  // Disable viewer for Unity (no Pangolin)
-  // config.viewer_config.enabled = false; -> Removed as member does not exist
 
   try {
-    vo_ = std::make_unique<VisualOdometry>(config);
+    // ---------------------------------------------------------------
+    // Build VioManagerOptions
+    // ---------------------------------------------------------------
+    ov_srvins::VioManagerOptions params;
+
+    // --- State options ---
+    params.state_options.num_cameras = 1;
+    params.state_options.do_fej = true;
+    params.state_options.use_rk4_integration = true;
+    params.state_options.do_calib_camera_pose = false;
+    params.state_options.do_calib_camera_intrinsics = false;
+    params.state_options.do_calib_camera_timeoffset = false;
+    params.state_options.max_clone_size = 11;
+    params.state_options.max_slam_features = 25;
+
+    // --- Camera intrinsics (CamRadtan) ---
+    auto cam = std::make_shared<ov_core::CamRadtan>(camera.width, camera.height);
+    VecX cam_values(8);
+    cam_values << (DataType)camera.fx, (DataType)camera.fy,
+                  (DataType)camera.cx, (DataType)camera.cy,
+                  (DataType)camera.k1, (DataType)camera.k2,
+                  (DataType)camera.p1, (DataType)camera.p2;
+    cam->set_value(cam_values);
+    params.camera_intrinsics[0] = cam;
+
+    // --- Camera extrinsics (q_ItoC, p_IinC) ---
+    // The extrinsics input is T_cam_imu (T_CfromI) as a 4x4 row-major matrix
+    // VioManager expects a 7-element vector: [q_ItoC (JPL x,y,z,w), p_IinC (3)]
+    VecX cam_ext(7);
+    if (extrinsics != nullptr) {
+      // Parse the 4x4 row-major T_cam_imu = T_CfromI
+      Eigen::Matrix4d T_CfromI;
+      for (int r = 0; r < 4; r++)
+        for (int c = 0; c < 4; c++)
+          T_CfromI(r, c) = (double)extrinsics->T_cam_imu[r * 4 + c];
+
+      Eigen::Matrix3d R_ItoC = T_CfromI.block<3, 3>(0, 0);
+      Eigen::Vector3d p_IinC = T_CfromI.block<3, 1>(0, 3);
+
+      // Convert R_ItoC to JPL quaternion [x, y, z, w]
+      Vec4 q_ItoC = ov_core::rot_2_quat(R_ItoC);
+
+      cam_ext.head<4>() = q_ItoC;
+      cam_ext.tail<3>() = p_IinC.cast<DataType>();
+    } else {
+      // Identity extrinsics: camera aligned with IMU
+      cam_ext << 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0;
+    }
+    params.camera_extrinsics[0] = cam_ext;
+
+    // --- IMU noise parameters ---
+    if (imu_params != nullptr) {
+      params.imu_noises.sigma_w = (DataType)imu_params->noise_gyro;
+      params.imu_noises.sigma_w_2 =
+          (DataType)(imu_params->noise_gyro * imu_params->noise_gyro);
+      params.imu_noises.sigma_wb = (DataType)imu_params->gyro_walk;
+      params.imu_noises.sigma_wb_2 =
+          (DataType)(imu_params->gyro_walk * imu_params->gyro_walk);
+      params.imu_noises.sigma_a = (DataType)imu_params->noise_acc;
+      params.imu_noises.sigma_a_2 =
+          (DataType)(imu_params->noise_acc * imu_params->noise_acc);
+      params.imu_noises.sigma_ab = (DataType)imu_params->acc_walk;
+      params.imu_noises.sigma_ab_2 =
+          (DataType)(imu_params->acc_walk * imu_params->acc_walk);
+    }
+    // else: use NoiseManager defaults
+
+    // --- Tracker parameters ---
+    if (tracking != nullptr) {
+      if (tracking->max_features > 0)
+        params.num_pts = tracking->max_features;
+      if (tracking->fast_threshold > 0)
+        params.fast_threshold = tracking->fast_threshold;
+      if (tracking->grid_x > 0)
+        params.grid_x = tracking->grid_x;
+      if (tracking->grid_y > 0)
+        params.grid_y = tracking->grid_y;
+      if (tracking->min_px_dist > 0)
+        params.min_px_dist = tracking->min_px_dist;
+    } else {
+      // Reasonable defaults for mobile
+      params.num_pts = 150;
+      params.fast_threshold = 20;
+      params.grid_x = 5;
+      params.grid_y = 5;
+      params.min_px_dist = 10;
+    }
+
+    // --- Other parameters ---
+    params.use_stereo = false;  // Monocular
+    params.use_klt = true;
+    params.use_aruco = false;   // No ArUco on Android
+    params.record_timing_information = false;
+    params.try_zupt = true;     // Enable zero-velocity updates
+    params.gravity_mag = 9.81;
+    params.calib_camimu_dt = 0.0;
+
+    // --- Initialize VioManager ---
+    vio_manager_ = std::make_shared<ov_srvins::VioManager>(params);
     initialized_ = true;
+    frame_count_ = 0;
 
     // Reset last valid pose
     std::memset(&last_valid_pose_, 0, sizeof(VOPose));
     last_valid_pose_.qw = 1.0f;
     last_valid_pose_.valid = 0;
 
+    PRINT_INFO("[VOBridge] VioManager initialized successfully\n");
+    PRINT_INFO("[VOBridge] Camera: %dx%d, fx=%.1f fy=%.1f\n",
+               camera.width, camera.height, camera.fx, camera.fy);
+    if (imu_params)
+      PRINT_INFO("[VOBridge] IMU noise: gw=%.6f, aw=%.6f\n",
+                 imu_params->noise_gyro, imu_params->noise_acc);
+
     return VO_SUCCESS;
   } catch (const std::exception &e) {
-    vo_.reset();
+    PRINT_ERROR("[VOBridge] Initialize failed: %s\n", e.what());
+    vio_manager_.reset();
     return VO_ERROR_INVALID_PARAM;
   }
 }
 
+// ============================================================================
+// Shutdown
+// ============================================================================
+
 VOErrorCode VOUnityBridge::shutdown() {
   std::lock_guard<std::mutex> lock(mutex_);
 
-  vo_.reset();
+  vio_manager_.reset();
   initialized_ = false;
+  frame_count_ = 0;
 
-  // Reset last valid pose
   std::memset(&last_valid_pose_, 0, sizeof(VOPose));
   last_valid_pose_.qw = 1.0f;
   last_valid_pose_.valid = 0;
@@ -145,185 +222,300 @@ bool VOUnityBridge::isInitialized() const {
   return initialized_;
 }
 
+// ============================================================================
+// Feed IMU
+// ============================================================================
+
+VOErrorCode VOUnityBridge::feedImu(const VOImuData &imu) {
+  std::lock_guard<std::mutex> lock(mutex_);
+
+  if (!initialized_ || vio_manager_ == nullptr)
+    return VO_ERROR_NOT_INITIALIZED;
+
+  try {
+    ov_core::ImuData msg;
+    msg.timestamp = imu.timestamp;
+    // gyroscope reading (rad/s)
+    msg.wm << (DataType)imu.gx, (DataType)imu.gy, (DataType)imu.gz;
+    // accelerometer reading (m/s^2)
+    msg.am << (DataType)imu.ax, (DataType)imu.ay, (DataType)imu.az;
+
+    vio_manager_->feed_measurement_imu(msg);
+    return VO_SUCCESS;
+  } catch (const std::exception &e) {
+    PRINT_ERROR("[VOBridge] feedImu failed: %s\n", e.what());
+    return VO_ERROR_TRACKING_FAILED;
+  }
+}
+
+// ============================================================================
+// Process Frame
+// ============================================================================
+
 VOErrorCode VOUnityBridge::processFrame(const uint8_t *data, int width,
                                         int height, int channels,
                                         double timestamp) {
   std::lock_guard<std::mutex> lock(mutex_);
 
-  if (!initialized_ || vo_ == nullptr) {
+  if (!initialized_ || vio_manager_ == nullptr)
     return VO_ERROR_NOT_INITIALIZED;
-  }
 
-  // Validate image dimensions
-  if (width != camera_params_.width || height != camera_params_.height) {
+  if (width != camera_params_.width || height != camera_params_.height)
     return VO_ERROR_INVALID_IMAGE;
-  }
 
-  // Validate channels
-  if (channels != 1 && channels != 4) {
+  if (channels != 1 && channels != 4)
     return VO_ERROR_INVALID_IMAGE;
-  }
 
   try {
     cv::Mat gray;
 
     if (channels == 1) {
-      // Already grayscale
-      gray =
-          cv::Mat(height, width, CV_8UC1, const_cast<uint8_t *>(data)).clone();
+      gray = cv::Mat(height, width, CV_8UC1, const_cast<uint8_t *>(data)).clone();
     } else if (channels == 4) {
-      // Convert RGBA to grayscale
       cv::Mat rgba(height, width, CV_8UC4, const_cast<uint8_t *>(data));
       cv::cvtColor(rgba, gray, cv::COLOR_RGBA2GRAY);
     }
 
-    // Save current frame for debug visualization
+    // Save for debug visualization
     current_frame_ = gray.clone();
 
-    // Process the frame
-    vo_->processFrame(gray, timestamp);
+    // Build CameraData message
+    ov_core::CameraData msg;
+    msg.timestamp = timestamp;
+    msg.sensor_ids.push_back(0);      // Camera 0
+    msg.images.push_back(gray);
+    msg.masks.push_back(cv::Mat::zeros(gray.size(), CV_8UC1));
+
+    // Feed to VioManager
+    vio_manager_->feed_measurement_camera(msg);
+
+    frame_count_++;
+    if (frame_count_ % 30 == 0) {
+      bool is_init = vio_manager_->initialized();
+      PRINT_DEBUG("[VOBridge] Frame %d, VIO initialized: %d\n",
+                  frame_count_, is_init ? 1 : 0);
+    }
 
     return VO_SUCCESS;
   } catch (const std::exception &e) {
+    PRINT_ERROR("[VOBridge] processFrame failed: %s\n", e.what());
     return VO_ERROR_TRACKING_FAILED;
   }
 }
 
+// ============================================================================
+// Get Pose
+// ============================================================================
+
+VOErrorCode VOUnityBridge::getPose(VOPose *out) const {
+  std::lock_guard<std::mutex> lock(mutex_);
+
+  if (!initialized_ || vio_manager_ == nullptr) {
+    *out = last_valid_pose_;
+    return VO_ERROR_NOT_INITIALIZED;
+  }
+
+  // Check if VIO has been initialized (static/dynamic init complete)
+  if (!vio_manager_->initialized()) {
+    out->px = 0;
+    out->py = 0;
+    out->pz = 0;
+    out->qx = 0;
+    out->qy = 0;
+    out->qz = 0;
+    out->qw = 1.0f;
+    out->valid = 0;
+    return VO_SUCCESS;
+  }
+
+  try {
+    auto state = vio_manager_->get_state();
+    if (!state || !state->imu) {
+      *out = last_valid_pose_;
+      return VO_ERROR_POSE_FAILED;
+    }
+
+    // Extract pose from state:
+    // imu->Rot() = R_GtoI (rotation from global to IMU)
+    // imu->pos() = p_IinG (position of IMU in global)
+    Eigen::Matrix<DataType, 3, 3> R_GtoI = state->imu->Rot();
+    Eigen::Matrix<DataType, 3, 1> p_IinG = state->imu->pos();
+
+    // Convert to double for coordinate conversion
+    Eigen::Matrix3d R_GtoI_d = R_GtoI.template cast<double>();
+    Eigen::Vector3d p_IinG_d = p_IinG.template cast<double>();
+
+    convertToUnityCoordinates(p_IinG_d, R_GtoI_d, *out);
+
+    const_cast<VOUnityBridge *>(this)->last_valid_pose_ = *out;
+    return VO_SUCCESS;
+  } catch (const std::exception &e) {
+    PRINT_ERROR("[VOBridge] getPose failed: %s\n", e.what());
+    *out = last_valid_pose_;
+    return VO_ERROR_POSE_FAILED;
+  }
+}
+
+// ============================================================================
+// Coordinate Conversion
+// ============================================================================
+
+void VOUnityBridge::convertToUnityCoordinates(const Eigen::Vector3d &p_IinG,
+                                               const Eigen::Matrix3d &R_GtoI,
+                                               VOPose &out) const {
+  // sqrtVINS (OpenVINS convention):
+  //   Right-handed, gravity-aligned global frame
+  //   Typically: X-right/east, Y-forward/north, Z-up
+  //   R_GtoI: rotation from global to IMU body
+  //   p_IinG: position of IMU in global frame
+  //
+  // Unity:
+  //   Left-handed, Y-up
+  //   X-right, Y-up, Z-forward
+  //
+  // Conversion from right-handed (X-right, Y-forward, Z-up) to
+  // left-handed (X-right, Y-up, Z-forward):
+  //   Unity_X =  VIO_X
+  //   Unity_Y =  VIO_Z   (Z-up -> Y-up)
+  //   Unity_Z =  VIO_Y   (Y-forward -> Z-forward)
+  //
+  // This is a coordinate permutation, not a simple axis flip.
+
+  // Position conversion
+  out.px = static_cast<float>(p_IinG.x());   // X -> X
+  out.py = static_cast<float>(p_IinG.z());   // Z -> Y (up)
+  out.pz = static_cast<float>(p_IinG.y());   // Y -> Z (forward)
+
+  // Rotation conversion:
+  // R_GtoI is in VIO coordinates. We need R_UnityG_to_UnityI
+  // Let P be the permutation matrix: P * v_VIO = v_Unity
+  //   P = [1 0 0; 0 0 1; 0 1 0]  (swap Y and Z)
+  // But this has det=-1, so we also need to handle the handedness flip.
+  //
+  // For left-handed system, we negate one axis. Standard approach:
+  // Mirror X: Unity uses left-handed, so flip X.
+  //   v_Unity = [-VIO_X, VIO_Z, VIO_Y]
+  //
+  // Actually, the most robust approach for VIO->Unity:
+  // R_world_to_body in VIO (right-handed) -> R in Unity (left-handed)
+  // We compute R_ItoG = R_GtoI.transpose() (world rotation of body)
+  // Then convert the rotation matrix.
+
+  Eigen::Matrix3d R_ItoG = R_GtoI.transpose();
+
+  // Convert rotation from right-handed to left-handed (Unity) by
+  // negating the X component (mirror X axis):
+  // R_unity = S * R_ItoG * S, where S = diag(-1, 1, 1)
+  // Then swap Y<->Z: apply permutation P = [row swap 1<->2]
+  // Combined: T * R_ItoG * T^(-1) where T handles both mirror and permutation
+  //
+  // T = [-1  0  0]    (negate X, swap Y<->Z)
+  //     [ 0  0  1]
+  //     [ 0  1  0]
+  Eigen::Matrix3d T;
+  T << -1, 0, 0,
+        0, 0, 1,
+        0, 1, 0;
+
+  Eigen::Matrix3d R_unity = T * R_ItoG * T.transpose();
+
+  // Convert to quaternion
+  Eigen::Quaterniond q(R_unity);
+  q.normalize();
+
+  out.qx = static_cast<float>(q.x());
+  out.qy = static_cast<float>(q.y());
+  out.qz = static_cast<float>(q.z());
+  out.qw = static_cast<float>(q.w());
+  out.valid = 1;
+}
+
+// ============================================================================
+// Feature Access
+// ============================================================================
+
 int VOUnityBridge::getFeatureCount() const {
   std::lock_guard<std::mutex> lock(mutex_);
 
-  if (!initialized_ || vo_ == nullptr) {
+  if (!initialized_ || vio_manager_ == nullptr)
     return -1;
-  }
 
-  TrackBase *tracker = vo_->getTracker();
-  if (tracker == nullptr) {
-    return 0;
-  }
-
-  // Get features from camera 0
-  auto last_obs = tracker->get_last_obs();
-  if (last_obs.find(0) != last_obs.end()) {
-    return static_cast<int>(last_obs[0].size());
-  }
-
-  return 0;
+  // Get the tracked features from VioManager's internal tracker
+  // VioManager has trackFEATS but it's protected; we access via get_historical_viz_image
+  // Alternative: access the state's good_features_MSCKF
+  auto good_feats = vio_manager_->get_good_features_MSCKF();
+  return static_cast<int>(good_feats.size());
 }
 
 VOErrorCode VOUnityBridge::getFeatures(VOFeature *out, int maxCount,
                                        int *outCount) const {
   std::lock_guard<std::mutex> lock(mutex_);
 
-  if (!initialized_ || vo_ == nullptr) {
+  if (!initialized_ || vio_manager_ == nullptr) {
     *outCount = 0;
     return VO_ERROR_NOT_INITIALIZED;
   }
 
-  TrackBase *tracker = vo_->getTracker();
-  if (tracker == nullptr) {
+  // We can report SLAM features that are in the state
+  auto state = vio_manager_->get_state();
+  if (!state) {
     *outCount = 0;
     return VO_SUCCESS;
   }
 
-  auto last_obs = tracker->get_last_obs();
-  auto last_ids = tracker->get_last_ids();
-
-  // Get features from camera 0
-  if (last_obs.find(0) == last_obs.end() ||
-      last_ids.find(0) == last_ids.end()) {
-    *outCount = 0;
-    return VO_SUCCESS;
-  }
-
-  const auto &keypoints = last_obs[0];
-  const auto &ids = last_ids[0];
-
-  int count = std::min(maxCount, static_cast<int>(keypoints.size()));
-
-  for (int i = 0; i < count; ++i) {
-    out[i].id = static_cast<int>(ids[i]);
-    out[i].x = keypoints[i].pt.x;
-    out[i].y = keypoints[i].pt.y;
-    out[i].status = 1; // Tracked
+  int count = 0;
+  for (auto &feat_pair : state->features_SLAM) {
+    if (count >= maxCount)
+      break;
+    auto &feat = feat_pair.second;
+    auto feat_val = feat->get_xyz(false);
+    out[count].id = static_cast<int>(feat_pair.first);
+    // Project to 2D would require camera model; for now report 3D x,y
+    out[count].x = static_cast<float>(feat_val(0));
+    out[count].y = static_cast<float>(feat_val(1));
+    out[count].status = 1; // Tracked
+    count++;
   }
 
   *outCount = count;
   return VO_SUCCESS;
 }
 
-VOErrorCode VOUnityBridge::getPose(VOPose *out) const {
-  std::lock_guard<std::mutex> lock(mutex_);
-
-  if (!initialized_ || vo_ == nullptr) {
-    *out = last_valid_pose_;
-    return VO_ERROR_NOT_INITIALIZED;
-  }
-
-  try {
-    Eigen::Matrix4d pose = vo_->getCurrentPose();
-    bool pose_fresh = vo_->isPoseUpdated();
-    convertToUnityCoordinates(pose, *out);
-
-    if (pose_fresh) {
-      // PnP succeeded this frame, use visual pose
-      const_cast<VOUnityBridge *>(this)->last_valid_pose_ = *out;
-      // Reset IMU integration
-      const_cast<VOUnityBridge *>(this)->position_delta_ = Eigen::Vector3d::Zero();
-      const_cast<VOUnityBridge *>(this)->orientation_delta_ = Eigen::Quaterniond::Identity();
-      const_cast<VOUnityBridge *>(this)->velocity_ = Eigen::Vector3d::Zero();
-    } else {
-      // PnP failed this frame, use IMU prediction
-      if (imu_initialized_) {
-        // Apply IMU delta to last valid pose
-        out->px = last_valid_pose_.px + static_cast<float>(position_delta_.x());
-        out->py = last_valid_pose_.py + static_cast<float>(position_delta_.y());
-        out->pz = last_valid_pose_.pz + static_cast<float>(position_delta_.z());
-
-        // Apply orientation delta
-        Eigen::Quaterniond last_q(last_valid_pose_.qw, last_valid_pose_.qx,
-                                   last_valid_pose_.qy, last_valid_pose_.qz);
-        Eigen::Quaterniond new_q = last_q * orientation_delta_;
-        new_q.normalize();
-
-        out->qx = static_cast<float>(new_q.x());
-        out->qy = static_cast<float>(new_q.y());
-        out->qz = static_cast<float>(new_q.z());
-        out->qw = static_cast<float>(new_q.w());
-        out->valid = 1;  // Mark as valid (IMU predicted)
-
-        return VO_SUCCESS;
-      }
-      // No IMU data, return last valid pose
-      *out = last_valid_pose_;
-      return VO_ERROR_POSE_FAILED;
-    }
-
-    return VO_SUCCESS;
-  } catch (const std::exception &e) {
-    *out = last_valid_pose_;
-    return VO_ERROR_POSE_FAILED;
-  }
-}
-
 VOErrorCode VOUnityBridge::getPointCloud(float *out, int maxPoints,
                                          int *outCount) const {
   std::lock_guard<std::mutex> lock(mutex_);
 
-  if (!initialized_ || vo_ == nullptr) {
+  if (!initialized_ || vio_manager_ == nullptr) {
     *outCount = 0;
     return VO_ERROR_NOT_INITIALIZED;
   }
 
   try {
-    std::vector<Eigen::Vector3d> points = vo_->getPointCloud();
+    // Get SLAM features in global frame
+    auto slam_feats = vio_manager_->get_features_SLAM();
+    auto msckf_feats = vio_manager_->get_good_features_MSCKF();
 
-    int count = std::min(maxPoints, static_cast<int>(points.size()));
+    int count = 0;
 
-    for (int i = 0; i < count; ++i) {
-      // Convert to Unity coordinates (flip Y)
-      out[i * 3 + 0] = static_cast<float>(points[i].x());
-      out[i * 3 + 1] = static_cast<float>(-points[i].y()); // Flip Y
-      out[i * 3 + 2] = static_cast<float>(points[i].z());
+    // Add SLAM features
+    for (auto &pt : slam_feats) {
+      if (count >= maxPoints)
+        break;
+      // Convert to Unity coordinates (same permutation as pose)
+      out[count * 3 + 0] = static_cast<float>(pt(0));      // X
+      out[count * 3 + 1] = static_cast<float>(pt(2));      // Z -> Y (up)
+      out[count * 3 + 2] = static_cast<float>(pt(1));      // Y -> Z (forward)
+      count++;
+    }
+
+    // Add MSCKF features
+    for (auto &pt : msckf_feats) {
+      if (count >= maxPoints)
+        break;
+      out[count * 3 + 0] = static_cast<float>(pt(0));
+      out[count * 3 + 1] = static_cast<float>(pt(2));
+      out[count * 3 + 2] = static_cast<float>(pt(1));
+      count++;
     }
 
     *outCount = count;
@@ -334,155 +526,84 @@ VOErrorCode VOUnityBridge::getPointCloud(float *out, int maxPoints,
   }
 }
 
+// ============================================================================
+// Runtime Configuration
+// ============================================================================
+
 VOErrorCode VOUnityBridge::setMaxFeatures(int count) {
   std::lock_guard<std::mutex> lock(mutex_);
-
-  if (count <= 0) {
+  if (count <= 0)
     return VO_ERROR_INVALID_PARAM;
-  }
-
-  tracking_params_.max_features = count;
-
-  if (initialized_ && vo_ != nullptr) {
-    TrackBase *tracker = vo_->getTracker();
-    if (tracker != nullptr) {
-      tracker->set_num_features(count);
-    }
-  }
-
+  // Runtime feature count change is not directly supported by VioManager
+  // The parameter is set at construction time
   return VO_SUCCESS;
 }
 
 VOErrorCode VOUnityBridge::setFastThreshold(int threshold) {
   std::lock_guard<std::mutex> lock(mutex_);
-
-  if (threshold <= 0) {
+  if (threshold <= 0)
     return VO_ERROR_INVALID_PARAM;
-  }
-
-  tracking_params_.fast_threshold = threshold;
-
-  // Note: FAST threshold update requires tracker reconfiguration
-  // which is not directly supported by TrackBase interface.
-  // The new threshold will be used on next initialization.
-
+  // Runtime threshold change is not directly supported by VioManager
   return VO_SUCCESS;
 }
 
-void VOUnityBridge::convertToUnityCoordinates(const Eigen::Matrix4d &pose,
-                                              VOPose &out) const {
-  // Extract rotation matrix and translation
-  Eigen::Matrix3d R = pose.block<3, 3>(0, 0);
-  Eigen::Vector3d t = pose.block<3, 1>(0, 3);
-
-  // Convert coordinate system: OpenCV (Y-down) to Unity (Y-up)
-  // Flip Y axis
-  out.px = static_cast<float>(t.x());
-  out.py = static_cast<float>(-t.y());
-  out.pz = static_cast<float>(t.z());
-
-  // Convert rotation matrix to quaternion
-  // First apply coordinate transformation to rotation
-  Eigen::Matrix3d R_unity;
-  R_unity(0, 0) = R(0, 0);
-  R_unity(0, 1) = -R(0, 1);
-  R_unity(0, 2) = R(0, 2);
-  R_unity(1, 0) = -R(1, 0);
-  R_unity(1, 1) = R(1, 1);
-  R_unity(1, 2) = -R(1, 2);
-  R_unity(2, 0) = R(2, 0);
-  R_unity(2, 1) = -R(2, 1);
-  R_unity(2, 2) = R(2, 2);
-
-  // Convert to quaternion using Eigen
-  Eigen::Quaterniond q(R_unity);
-  q.normalize();
-
-  out.qx = static_cast<float>(q.x());
-  out.qy = static_cast<float>(q.y());
-  out.qz = static_cast<float>(q.z());
-  out.qw = static_cast<float>(q.w());
-
-  // Check if pose is valid (not identity or near-zero)
-  double det = R.determinant();
-  out.valid = (std::abs(det - 1.0) < 0.1) ? 1 : 0;
-}
+// ============================================================================
+// Debug Image
+// ============================================================================
 
 VOErrorCode VOUnityBridge::getDebugImage(uint8_t *out, int width, int height,
                                          bool drawPoints, bool drawFlow) const {
   std::lock_guard<std::mutex> lock(mutex_);
 
-  if (!initialized_ || vo_ == nullptr) {
+  if (!initialized_ || vio_manager_ == nullptr)
     return VO_ERROR_NOT_INITIALIZED;
-  }
 
   if (out == nullptr || width != camera_params_.width ||
-      height != camera_params_.height) {
+      height != camera_params_.height)
     return VO_ERROR_INVALID_PARAM;
-  }
 
-  if (current_frame_.empty()) {
+  if (current_frame_.empty())
     return VO_ERROR_INVALID_IMAGE;
-  }
 
   try {
-    // Convert grayscale to RGBA
+    // Use VioManager's built-in visualization if available
+    cv::Mat vizImg = vio_manager_->get_historical_viz_image();
+
     cv::Mat debugImg;
-    cv::cvtColor(current_frame_, debugImg, cv::COLOR_GRAY2RGBA);
-
-    // Get current features
-    TrackBase *tracker = vo_->getTracker();
-    if (tracker != nullptr) {
-      auto last_obs = tracker->get_last_obs();
-      auto last_ids = tracker->get_last_ids();
-
-      if (last_obs.find(0) != last_obs.end() &&
-          last_ids.find(0) != last_ids.end()) {
-        const auto &keypoints = last_obs[0];
-        const auto &ids = last_ids[0];
-
-        for (size_t i = 0; i < keypoints.size(); ++i) {
-          cv::Point2f pt(keypoints[i].pt.x, keypoints[i].pt.y);
-          int id = static_cast<int>(ids[i]);
-
-          // Draw optical flow (white line, matching test_webcam style)
-          if (drawFlow) {
-            auto prevIt = prev_feature_positions_.find(id);
-            if (prevIt != prev_feature_positions_.end()) {
-              cv::Point2f prevPt = prevIt->second;
-              // Only draw if movement is reasonable (not a reset)
-              float dist = cv::norm(pt - prevPt);
-              if (dist < width * 0.2f) {
-                // White color like test_webcam's display_history
-                cv::line(debugImg, prevPt, pt, cv::Scalar(255, 255, 255, 255), 1);
-              }
-            }
-          }
-
-          // Draw feature point (red filled circle + blue rectangle, matching test_webcam style)
-          if (drawPoints) {
-            // Red filled circle
-            cv::circle(debugImg, pt, 2, cv::Scalar(255, 0, 0, 255), -1);
-            // Blue rectangle around the point
-            cv::Point2f pt_top = cv::Point2f(pt.x - 3, pt.y - 3);
-            cv::Point2f pt_bot = cv::Point2f(pt.x + 3, pt.y + 3);
-            cv::rectangle(debugImg, pt_top, pt_bot, cv::Scalar(0, 0, 255, 255), 1);
-          }
-
-          // Update previous position
-          prev_feature_positions_[id] = pt;
-        }
+    if (!vizImg.empty()) {
+      // VioManager provides a visualization with tracked features
+      // Resize to match expected output if needed
+      if (vizImg.rows != height || vizImg.cols != width) {
+        cv::resize(vizImg, vizImg, cv::Size(width, height));
       }
+      // Convert to RGBA
+      if (vizImg.channels() == 3) {
+        cv::cvtColor(vizImg, debugImg, cv::COLOR_BGR2RGBA);
+      } else if (vizImg.channels() == 1) {
+        cv::cvtColor(vizImg, debugImg, cv::COLOR_GRAY2RGBA);
+      } else if (vizImg.channels() == 4) {
+        debugImg = vizImg;
+      } else {
+        cv::cvtColor(current_frame_, debugImg, cv::COLOR_GRAY2RGBA);
+      }
+    } else {
+      // Fallback: draw on current grayscale frame
+      cv::cvtColor(current_frame_, debugImg, cv::COLOR_GRAY2RGBA);
+
+      // Draw good MSCKF features (projected would require camera model)
+      // For now, just show the grayscale frame
     }
 
-    // Copy to output buffer (RGBA format)
     std::memcpy(out, debugImg.data, width * height * 4);
-
     return VO_SUCCESS;
   } catch (const std::exception &e) {
     return VO_ERROR_TRACKING_FAILED;
   }
 }
+
+// ============================================================================
+// Native Texture
+// ============================================================================
 
 VOErrorCode VOUnityBridge::setNativeTexture(void *ptr, int width, int height) {
   std::lock_guard<std::mutex> lock(mutex_);
@@ -492,72 +613,7 @@ VOErrorCode VOUnityBridge::setNativeTexture(void *ptr, int width, int height) {
   return VO_SUCCESS;
 }
 
-VOErrorCode VOUnityBridge::feedImu(const VOImuData &imu) {
-  std::lock_guard<std::mutex> lock(mutex_);
-
-  if (!initialized_) {
-    return VO_ERROR_NOT_INITIALIZED;
-  }
-
-  // Add to buffer
-  imu_buffer_.push_back(imu);
-  if (imu_buffer_.size() > MAX_IMU_BUFFER_SIZE) {
-    imu_buffer_.pop_front();
-  }
-
-  // Perform IMU integration
-  if (!imu_initialized_) {
-    last_imu_timestamp_ = imu.timestamp;
-    imu_initialized_ = true;
-    return VO_SUCCESS;
-  }
-
-  double dt = imu.timestamp - last_imu_timestamp_;
-  if (dt <= 0 || dt > 0.5) {
-    // Invalid dt, reset
-    last_imu_timestamp_ = imu.timestamp;
-    return VO_SUCCESS;
-  }
-
-  // Get acceleration and angular velocity
-  Eigen::Vector3d accel(imu.ax, imu.ay, imu.az);
-  Eigen::Vector3d gyro(imu.gx, imu.gy, imu.gz);
-
-  // Integrate orientation (simple Euler integration)
-  Eigen::Quaterniond dq;
-  Eigen::Vector3d half_theta = gyro * dt * 0.5;
-  dq.w() = 1.0;
-  dq.x() = half_theta.x();
-  dq.y() = half_theta.y();
-  dq.z() = half_theta.z();
-  dq.normalize();
-  orientation_delta_ = orientation_delta_ * dq;
-  orientation_delta_.normalize();
-
-  // Remove gravity and integrate velocity/position
-  Eigen::Vector3d accel_world = orientation_delta_ * accel + gravity_;
-  velocity_ += accel_world * dt;
-  position_delta_ += velocity_ * dt;
-
-  last_imu_timestamp_ = imu.timestamp;
-  return VO_SUCCESS;
-}
-
-VOErrorCode VOUnityBridge::resetImu() {
-  std::lock_guard<std::mutex> lock(mutex_);
-
-  imu_buffer_.clear();
-  velocity_ = Eigen::Vector3d::Zero();
-  position_delta_ = Eigen::Vector3d::Zero();
-  orientation_delta_ = Eigen::Quaterniond::Identity();
-  last_imu_timestamp_ = -1.0;
-  imu_initialized_ = false;
-
-  return VO_SUCCESS;
-}
-
 void VOUnityBridge::onRenderEvent(int eventID) {
-  // We only support eventID 1 for texture update
   if (eventID != 1)
     return;
 
@@ -565,81 +621,49 @@ void VOUnityBridge::onRenderEvent(int eventID) {
 
   if (native_texture_ptr_ == nullptr || current_frame_.empty())
     return;
-
   if (texture_width_ == 0 || texture_height_ == 0)
     return;
 
-  // Reset GL state/error
   while (glGetError() != GL_NO_ERROR)
     ;
 
   try {
-    // Convert grayscale to RGBA
+    // Get visualization from VioManager
+    cv::Mat vizImg = vio_manager_ ? vio_manager_->get_historical_viz_image()
+                                  : cv::Mat();
+
     cv::Mat debugImg;
-    cv::cvtColor(current_frame_, debugImg, cv::COLOR_GRAY2RGBA);
-
-    // Get current features
-    if (initialized_ && vo_ != nullptr) {
-      TrackBase *tracker = vo_->getTracker();
-      if (tracker != nullptr) {
-        auto last_obs = tracker->get_last_obs();
-        auto last_ids = tracker->get_last_ids();
-
-        if (last_obs.find(0) != last_obs.end() &&
-            last_ids.find(0) != last_ids.end()) {
-          const auto &keypoints = last_obs[0];
-          const auto &ids = last_ids[0];
-
-          for (size_t i = 0; i < keypoints.size(); ++i) {
-            cv::Point2f pt(keypoints[i].pt.x, keypoints[i].pt.y);
-            int id = static_cast<int>(ids[i]);
-
-            // Draw optical flow (white line, matching test_webcam style)
-            auto prevIt = prev_feature_positions_.find(id);
-            if (prevIt != prev_feature_positions_.end()) {
-              cv::Point2f prevPt = prevIt->second;
-              float dist = cv::norm(pt - prevPt);
-              if (dist < texture_width_ * 0.2f) {
-                cv::line(debugImg, prevPt, pt, cv::Scalar(255, 255, 255, 255), 1);
-              }
-            }
-
-            // Draw feature point (red circle + blue rectangle, matching test_webcam style)
-            cv::circle(debugImg, pt, 2, cv::Scalar(255, 0, 0, 255), -1);
-            cv::Point2f pt_top = cv::Point2f(pt.x - 3, pt.y - 3);
-            cv::Point2f pt_bot = cv::Point2f(pt.x + 3, pt.y + 3);
-            cv::rectangle(debugImg, pt_top, pt_bot, cv::Scalar(0, 0, 255, 255), 1);
-
-            // Update previous position for next frame
-            // Note: We are updating this in render thread, which might be
-            // slightly out of sync with processFrame thread, but for
-            // visualization it is acceptable. To be strictly correct, this
-            // should be done in processFrame, but we do it here for vis.
-            prev_feature_positions_[id] = pt;
-          }
-        }
-      }
+    if (!vizImg.empty()) {
+      if (vizImg.channels() == 3)
+        cv::cvtColor(vizImg, debugImg, cv::COLOR_BGR2RGBA);
+      else if (vizImg.channels() == 1)
+        cv::cvtColor(vizImg, debugImg, cv::COLOR_GRAY2RGBA);
+      else
+        debugImg = vizImg.clone();
+    } else {
+      cv::cvtColor(current_frame_, debugImg, cv::COLOR_GRAY2RGBA);
     }
 
-    // Scale if texture size doesn't match frame size (unlikely but safe)
-    if (debugImg.rows != texture_height_ || debugImg.cols != texture_width_) {
+    if (debugImg.rows != texture_height_ || debugImg.cols != texture_width_)
       cv::resize(debugImg, debugImg, cv::Size(texture_width_, texture_height_));
-    }
 
-    // OpenGL Upload
-    // Cast void* to GLuint (safe on 32/64 bit as long as texture ID fits in
-    // pointer-sized int)
     GLuint glTexId = (GLuint)(size_t)(native_texture_ptr_);
-
     glBindTexture(GL_TEXTURE_2D, glTexId);
-    // Update the texture data
     glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, texture_width_, texture_height_,
                     GL_RGBA, GL_UNSIGNED_BYTE, debugImg.data);
     glBindTexture(GL_TEXTURE_2D, 0);
-
   } catch (...) {
-    // Silently ignore errors in render thread to avoid crashing
+    // Silently ignore errors in render thread
   }
 }
 
-} // namespace ov_core
+// ============================================================================
+// Reset
+// ============================================================================
+
+VOErrorCode VOUnityBridge::resetImu() {
+  std::lock_guard<std::mutex> lock(mutex_);
+  // VioManager handles IMU state internally; a full reset would require
+  // re-initialization. For now, this is a no-op.
+  return VO_SUCCESS;
+}

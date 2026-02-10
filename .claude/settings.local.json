@@ -1,7 +1,8 @@
 {
   "permissions": {
     "allow": [
-      "Bash(adb shell:*)"
+      "Bash(adb shell:*)",
+      "Bash(dir:*)"
     ]
   }
 }
