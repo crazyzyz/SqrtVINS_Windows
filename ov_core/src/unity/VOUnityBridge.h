@@ -8,6 +8,7 @@
 
 #include "vo_unity_api.h"
 
+#include <atomic>
 #include <memory>
 #include <mutex>
 #include <unordered_map>
@@ -15,6 +16,10 @@
 
 #include <Eigen/Dense>
 #include <opencv2/core.hpp>
+
+#if defined(__ANDROID__) || defined(ANDROID)
+#include "AndroidImuCollector.h"
+#endif
 
 // Forward declarations
 namespace ov_srvins {
@@ -58,6 +63,27 @@ public:
    * @brief Feed IMU measurement to VioManager
    */
   VOErrorCode feedImu(const VOImuData &imu);
+
+  /**
+   * @brief Start native IMU collection (Android only)
+   * @param target_hz Target sampling rate
+   */
+  VOErrorCode startNativeImu(int target_hz);
+
+  /**
+   * @brief Stop native IMU collection
+   */
+  VOErrorCode stopNativeImu();
+
+  /**
+   * @brief Check if native IMU is running
+   */
+  bool isNativeImuRunning() const;
+
+  /**
+   * @brief Get native sensor timestamp in seconds (CLOCK_BOOTTIME)
+   */
+  double getNativeSensorTimestamp() const;
 
   /**
    * @brief Get current pose from VioManager state
@@ -114,6 +140,16 @@ private:
 
   // Frame counter for logging
   int frame_count_ = 0;
+
+#if defined(__ANDROID__) || defined(ANDROID)
+  // Native IMU collector
+  std::unique_ptr<AndroidImuCollector> imu_collector_;
+  // Cached IMU params for coordinate conversion in callback
+  bool imu_use_native_ = false;
+#endif
+
+  // Native sensor timestamp (CLOCK_BOOTTIME seconds)
+  mutable std::atomic<double> native_sensor_ts_{0.0};
 };
 
 #endif // VO_UNITY_BRIDGE_H

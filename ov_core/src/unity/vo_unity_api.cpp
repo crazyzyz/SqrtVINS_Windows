@@ -243,4 +243,40 @@ VO_API VOErrorCode vo_set_native_texture(void *texture_ptr, int width,
                                                                 width, height);
 }
 
+// ============================================================================
+// Native IMU Collection
+// ============================================================================
+
+VO_API VOErrorCode vo_start_native_imu(int target_hz) {
+  try {
+    return VOUnityBridge::getInstance().startNativeImu(target_hz);
+  } catch (...) {
+    return VO_ERROR_TRACKING_FAILED;
+  }
+}
+
+VO_API VOErrorCode vo_stop_native_imu(void) {
+  try {
+    return VOUnityBridge::getInstance().stopNativeImu();
+  } catch (...) {
+    return VO_SUCCESS;
+  }
+}
+
+VO_API int vo_is_native_imu_running(void) {
+  try {
+    return VOUnityBridge::getInstance().isNativeImuRunning() ? 1 : 0;
+  } catch (...) {
+    return 0;
+  }
+}
+
+VO_API double vo_get_native_sensor_timestamp(void) {
+  try {
+    return VOUnityBridge::getInstance().getNativeSensorTimestamp();
+  } catch (...) {
+    return 0.0;
+  }
+}
+
 } // extern "C"

@@ -206,6 +206,30 @@ namespace SqrtVINS
         [DllImport(DLL_NAME, CallingConvention = CallingConvention.Cdecl)]
         public static extern int vo_set_native_texture(IntPtr texturePtr, int width, int height);
 
+        /// <summary>
+        /// 启动原生 IMU 采集 (Android Sensor API)
+        /// </summary>
+        [DllImport(DLL_NAME, CallingConvention = CallingConvention.Cdecl)]
+        public static extern int vo_start_native_imu(int target_hz);
+
+        /// <summary>
+        /// 停止原生 IMU 采集
+        /// </summary>
+        [DllImport(DLL_NAME, CallingConvention = CallingConvention.Cdecl)]
+        public static extern int vo_stop_native_imu();
+
+        /// <summary>
+        /// 检查原生 IMU 是否正在运行
+        /// </summary>
+        [DllImport(DLL_NAME, CallingConvention = CallingConvention.Cdecl)]
+        public static extern int vo_is_native_imu_running();
+
+        /// <summary>
+        /// 获取原生传感器时间戳 (CLOCK_BOOTTIME 秒)
+        /// </summary>
+        [DllImport(DLL_NAME, CallingConvention = CallingConvention.Cdecl)]
+        public static extern double vo_get_native_sensor_timestamp();
+
         #endregion
 
         #region Helper Methods

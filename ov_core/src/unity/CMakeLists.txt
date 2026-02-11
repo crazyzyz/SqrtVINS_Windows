@@ -67,6 +67,7 @@ set(SRVINS_SOURCES
     ${OV_SRVINS_SRC_DIR}/initializer/InertialInitializerOptions.cpp
     ${OV_SRVINS_SRC_DIR}/initializer/static/StaticInitializer.cpp
     ${OV_SRVINS_SRC_DIR}/initializer/dynamic/DynamicInitializer.cpp
+    ${OV_SRVINS_SRC_DIR}/initializer/dynamic/OpengvHelper.cpp
     ${OV_SRVINS_SRC_DIR}/initializer/dynamic/Solver.cpp
     ${OV_SRVINS_SRC_DIR}/utils/CameraPoseBuffer.cpp
     ${OV_SRVINS_SRC_DIR}/utils/EigenMatrixBuffer.cpp
@@ -79,6 +80,7 @@ set(SRVINS_SOURCES
 set(UNITY_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/vo_unity_api.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/VOUnityBridge.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/AndroidImuCollector.cpp
 )
 
 # Boost.Filesystem compiled sources (needed by VioManager timing stats)
@@ -112,6 +114,7 @@ target_compile_definitions(vo_unity PRIVATE
     ENABLE_ARUCO_TAGS=0
     BOOST_ALL_NO_LIB
     BOOST_FILESYSTEM_SOURCE
+    BOOST_FILESYSTEM_NO_CXX20_ATOMIC_REF
 )
 
 # Android NDK settings
@@ -136,8 +139,9 @@ set_target_properties(vo_unity PROPERTIES
 # Link libraries
 target_link_libraries(vo_unity PRIVATE
     ${OpenCV_LIBRARIES}
-    log  # Android log library
-    GLESv2 # OpenGL ES 2.0
+    android  # Android sensor API (ASensorManager)
+    log      # Android log library
+    GLESv2   # OpenGL ES 2.0
 )
 
 # Strip debug symbols in Release mode

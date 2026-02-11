@@ -114,7 +114,19 @@ namespace SqrtVINS
 
         // IMU 相关变量
         private float _lastImuTime = 0f;
-        private float _imuInterval; 
+        private float _imuInterval;
+
+        /// <summary>
+        /// 时间基准，IMU 和相机帧应使用同一基准
+        /// 由外部（如 AndroidCameraController）在相机启动时设置
+        /// </summary>
+        private double _timeBase;
+        public void SetTimeBase(double timeBase) { _timeBase = timeBase; }
+
+        /// <summary>
+        /// 是否正在使用原生 IMU (Android Sensor API)
+        /// </summary>
+        private bool _useNativeImu = false;
 
         private struct FrameData
         {
@@ -142,15 +154,21 @@ namespace SqrtVINS
 
             _frameQueue = new ConcurrentQueue<FrameData>();
 
-            // 初始化 IMU 间隔
+            // 初始化 IMU 间隔 (仅 Unity fallback 使用)
             _imuInterval = 1f / imuUpdateRate;
 
-            // 启用陀螺仪
+#if UNITY_ANDROID && !UNITY_EDITOR
+            // Android 平台使用原生 IMU，不启用 Unity 陀螺仪
+            Debug.Log("[VOManager] Android platform: will use native IMU");
+#else
+            // 编辑器/其他平台使用 Unity 陀螺仪作为 fallback
             if (useImu)
             {
                 Input.gyro.enabled = true;
-                Debug.Log("[VOManager] Gyroscope enabled");
+                Input.gyro.updateInterval = 1f / imuFrequency;
+                Debug.Log("[VOManager] Gyroscope enabled (Unity fallback)");
             }
+#endif
 
             _bufferPool = new ConcurrentQueue<byte[]>();
             _workerSignal = new AutoResetEvent(false);
@@ -178,9 +196,9 @@ namespace SqrtVINS
 
         private void Update()
         {
-            // 发送 IMU 数据 - 在 Running 和 Initializing 状态都需要发送
-            // VioManager 需要 IMU 数据来完成初始化
-            if (useImu && (_currentState == VOState.Running || _currentState == VOState.Initializing))
+            // 发送 IMU 数据 - 仅在非原生 IMU 模式下使用 Unity Input
+            // 原生 IMU 在 C++ 层直接采集并 feed，无需 Unity 端参与
+            if (useImu && !_useNativeImu && (_currentState == VOState.Running || _currentState == VOState.Initializing || _currentState == VOState.Lost))
             {
                 SendImuData();
             }
@@ -201,10 +219,12 @@ namespace SqrtVINS
                 OnPoseUpdated?.Invoke(pose);
 
                 // 简单的状态机逻辑
-                if (valid && _currentState == VOState.Lost)
+                if (valid && (_currentState == VOState.Lost || _currentState == VOState.Initializing))
                 {
+                    var prevState = _currentState;
                     SetState(VOState.Running);
-                    OnTrackingRecovered?.Invoke();
+                    if (prevState == VOState.Lost)
+                        OnTrackingRecovered?.Invoke();
                 }
                 else if (!valid && _currentState == VOState.Running)
                 {
@@ -308,9 +328,38 @@ namespace SqrtVINS
             {
                 // VioManager 创建成功，但 VIO 状态尚未初始化
                 // 需要等待足够的 IMU 数据和相机帧后自动初始化
-                SetState(VOState.Running);
+                // 保持 Initializing 状态，等收到有效 pose 后再转 Running
                 Debug.Log("[VOManager] VIO system created, waiting for initialization...");
                 StartWorker();
+
+#if UNITY_ANDROID && !UNITY_EDITOR
+                // 启动原生 IMU 采集
+                if (useImu)
+                {
+                    try
+                    {
+                        int imuResult = VONative.vo_start_native_imu((int)imuFrequency);
+                        if (imuResult == 0)
+                        {
+                            _useNativeImu = true;
+                            Debug.Log($"[VOManager] Native IMU started at {imuFrequency} Hz");
+                        }
+                        else
+                        {
+                            Debug.LogWarning($"[VOManager] Native IMU failed ({imuResult}), falling back to Unity IMU");
+                            Input.gyro.enabled = true;
+                            Input.gyro.updateInterval = 1f / imuFrequency;
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        Debug.LogWarning($"[VOManager] Native IMU exception: {ex.Message}, falling back to Unity IMU");
+                        Input.gyro.enabled = true;
+                        Input.gyro.updateInterval = 1f / imuFrequency;
+                    }
+                }
+#endif
+
                 return true;
             }
             else
@@ -387,6 +436,15 @@ namespace SqrtVINS
             if (_currentState == VOState.Uninitialized) return;
 
             StopWorker();
+
+#if UNITY_ANDROID && !UNITY_EDITOR
+            // 停止原生 IMU
+            if (_useNativeImu)
+            {
+                try { VONative.vo_stop_native_imu(); } catch (Exception) { }
+                _useNativeImu = false;
+            }
+#endif
 
             try
             {
@@ -522,6 +580,11 @@ namespace SqrtVINS
 
         /// <summary>
         /// 发送 IMU 数据到 SO 库
+        /// Unity 坐标系 (左手, Y-up): X-right, Y-up, Z-forward
+        /// VIO 坐标系 (右手, Z-up):   X-right, Y-forward, Z-up
+        /// 转换: vio_x = unity_x, vio_y = unity_z, vio_z = unity_y
+        /// 手性翻转需要取反一个轴: vio_z = -unity_y (加速度计)
+        /// 陀螺仪同理，但角速度是伪向量，手性翻转不取反
         /// </summary>
         private void SendImuData()
         {
@@ -535,16 +598,35 @@ namespace SqrtVINS
             Vector3 accel = Input.acceleration;
             Vector3 gyro = Input.gyro.rotationRateUnbiased;
 
-            // 构造 IMU 数据
+            // Unity Input.acceleration 返回的是归一化重力 (约 ±1g)
+            // 需要乘以 9.81 转为 m/s^2
+            float ax_unity = accel.x * 9.81f;
+            float ay_unity = accel.y * 9.81f;
+            float az_unity = accel.z * 9.81f;
+
+            // 坐标系转换: Unity(左手Y-up) -> VIO(右手Z-up)
+            // 加速度计 (真向量): 翻转手性需要取反一个轴
+            float ax_vio =  ax_unity;   // X -> X
+            float ay_vio =  az_unity;   // Z -> Y
+            float az_vio = -ay_unity;   // -Y -> Z (取反处理手性)
+
+            // 陀螺仪 (伪向量/角速度): 手性翻转取反
+            float gx_vio = -gyro.x;     // X -> -X
+            float gy_vio = -gyro.z;     // Z -> -Y
+            float gz_vio =  gyro.y;     // Y -> Z
+
+            // 使用与相机帧相同的时间基准
+            double timestamp = Time.realtimeSinceStartupAsDouble - _timeBase;
+
             VONative.VOImuData imuData = new VONative.VOImuData
             {
-                timestamp = Time.timeAsDouble,
-                ax = accel.x * 9.81f,
-                ay = accel.y * 9.81f,
-                az = accel.z * 9.81f,
-                gx = gyro.x,
-                gy = gyro.y,
-                gz = gyro.z
+                timestamp = timestamp,
+                ax = ax_vio,
+                ay = ay_vio,
+                az = az_vio,
+                gx = gx_vio,
+                gy = gy_vio,
+                gz = gz_vio
             };
 
             // 发送到 SO 库

@@ -116,7 +116,7 @@ typedef struct {
  * @brief Camera-IMU extrinsic parameters
  */
 typedef struct {
-  float T_cam_imu[16]; ///< 4x4 transform matrix (row-major): camera to IMU body
+  float T_cam_imu[16]; ///< 4x4 transform matrix (row-major): T_{cam<-imu}, transforms points from IMU frame to camera frame
 } VOExtrinsics;
 
 // ============================================================================
@@ -293,6 +293,35 @@ VO_API UnityRenderEventCallback vo_get_render_event_func(void);
  */
 VO_API VOErrorCode vo_set_native_texture(void *texture_ptr, int width,
                                          int height);
+
+// ============================================================================
+// Native IMU Collection (Android only)
+// ============================================================================
+
+/**
+ * @brief Start native IMU collection using Android Sensor API
+ * @param target_hz Target sampling rate in Hz (e.g., 200)
+ * @return VO_SUCCESS on success, VO_ERROR_INVALID_PARAM on non-Android
+ */
+VO_API VOErrorCode vo_start_native_imu(int target_hz);
+
+/**
+ * @brief Stop native IMU collection
+ * @return VO_SUCCESS on success
+ */
+VO_API VOErrorCode vo_stop_native_imu(void);
+
+/**
+ * @brief Check if native IMU is currently running
+ * @return 1 if running, 0 otherwise
+ */
+VO_API int vo_is_native_imu_running(void);
+
+/**
+ * @brief Get the latest native sensor timestamp (CLOCK_BOOTTIME seconds)
+ * @return Timestamp in seconds, or 0.0 if not available
+ */
+VO_API double vo_get_native_sensor_timestamp(void);
 
 #ifdef __cplusplus
 }

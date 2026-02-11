@@ -23,8 +23,7 @@ namespace SqrtVINS
 
         [Header("VIO 设置")]
         [SerializeField] private bool autoStartVIO = true;
-        [SerializeField] private float focalLengthEstimate = 500f;
-        
+
         [Header("调试渲染")]
         [SerializeField] private VODebugRenderer debugRenderer;
         [SerializeField] private bool useNativeDebugImage = true;
@@ -206,7 +205,13 @@ namespace SqrtVINS
             _isRunning = true;
             OnCameraStarted?.Invoke();
 
-            if (autoStartVIO) InitializeVIO(w, h);
+            if (autoStartVIO)
+            {
+                InitializeVIO(w, h);
+                // 同步时间基准，确保 IMU 和相机帧使用同一时钟
+                if (VOManager.Instance != null)
+                    VOManager.Instance.SetTimeBase(_startTime);
+            }
         }
 
         private void ProcessCameraFrame()
@@ -214,14 +219,31 @@ namespace SqrtVINS
             if (_webCamTexture == null || !_webCamTexture.isPlaying) return;
 
             _webCamTexture.GetPixels32(_pixelBuffer);
-            
+
             // Conversion happens here
             ProcessGrayscale(_pixelBuffer, _grayBuffer);
 
-            double ts = Time.realtimeSinceStartupAsDouble - _startTime;
+            double ts;
+#if UNITY_ANDROID && !UNITY_EDITOR
+            // 当原生 IMU 运行时，使用 CLOCK_BOOTTIME 时间戳保持与 IMU 同步
+            double nativeTs = VONative.vo_get_native_sensor_timestamp();
+            if (nativeTs > 0)
+            {
+                ts = nativeTs;
+            }
+            else
+            {
+                ts = Time.realtimeSinceStartupAsDouble - _startTime;
+            }
+#else
+            ts = Time.realtimeSinceStartupAsDouble - _startTime;
+#endif
             OnFrameReady?.Invoke(_grayBuffer, _webCamTexture.width, _webCamTexture.height, ts);
 
-            if (VOManager.Instance != null && VOManager.Instance.CurrentState == VOManager.VOState.Running)
+            if (VOManager.Instance != null &&
+                (VOManager.Instance.CurrentState == VOManager.VOState.Running ||
+                 VOManager.Instance.CurrentState == VOManager.VOState.Initializing ||
+                 VOManager.Instance.CurrentState == VOManager.VOState.Lost))
             {
                 VOManager.Instance.ProcessFrame(_grayBuffer, _webCamTexture.width, _webCamTexture.height, 1, ts);
             }
@@ -273,14 +295,8 @@ namespace SqrtVINS
                  go.AddComponent<VOManager>();
             }
 
-            VONative.VOCameraParams cam = new VONative.VOCameraParams
-            {
-                fx = focalLengthEstimate, fy = focalLengthEstimate,
-                cx = width/2f, cy = height/2f,
-                width = width, height = height
-            };
-
-            VOManager.Instance.Initialize(cam);
+            // 使用 VOManager 中的标定参数（来自 PARAconfig.yaml），不再覆盖
+            VOManager.Instance.Initialize();
 
             if (useNativeDebugImage && debugRenderer != null)
             {

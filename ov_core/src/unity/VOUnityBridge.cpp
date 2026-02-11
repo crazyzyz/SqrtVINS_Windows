@@ -24,12 +24,17 @@
 
 #if defined(__ANDROID__) || defined(ANDROID)
 #include <GLES2/gl2.h>
+#include <android/log.h>
+#define LOGD(...) __android_log_print(ANDROID_LOG_DEBUG, "VOBridge", __VA_ARGS__)
 #elif defined(_WIN32)
 #include <GL/gl.h>
 #include <windows.h>
 #ifndef GL_RG
 #define GL_RG 0x8227
 #endif
+#define LOGD(...) ((void)0)
+#else
+#define LOGD(...) ((void)0)
 #endif
 
 // ============================================================================
@@ -77,6 +82,7 @@ VOErrorCode VOUnityBridge::initialize(const VOCameraParams &camera,
   camera_params_ = camera;
 
   try {
+    LOGD("initialize: building VioManagerOptions...");
     // ---------------------------------------------------------------
     // Build VioManagerOptions
     // ---------------------------------------------------------------
@@ -127,6 +133,13 @@ VOErrorCode VOUnityBridge::initialize(const VOCameraParams &camera,
     }
     params.camera_extrinsics[0] = cam_ext;
 
+    // Sync camera params to init_options (InertialInitializer also validates)
+    params.init_options.num_cameras = 1;
+    params.init_options.camera_intrinsics[0] = cam;
+    params.init_options.camera_extrinsics[0] = cam_ext;
+
+    LOGD("initialize: camera + extrinsics set, configuring IMU noise...");
+
     // --- IMU noise parameters ---
     if (imu_params != nullptr) {
       params.imu_noises.sigma_w = (DataType)imu_params->noise_gyro;
@@ -174,8 +187,12 @@ VOErrorCode VOUnityBridge::initialize(const VOCameraParams &camera,
     params.gravity_mag = 9.81;
     params.calib_camimu_dt = 0.0;
 
+    LOGD("initialize: all params set, creating VioManager...");
+
     // --- Initialize VioManager ---
     vio_manager_ = std::make_shared<ov_srvins::VioManager>(params);
+
+    LOGD("initialize: VioManager created successfully");
     initialized_ = true;
     frame_count_ = 0;
 
@@ -205,6 +222,14 @@ VOErrorCode VOUnityBridge::initialize(const VOCameraParams &camera,
 
 VOErrorCode VOUnityBridge::shutdown() {
   std::lock_guard<std::mutex> lock(mutex_);
+
+#if defined(__ANDROID__) || defined(ANDROID)
+  if (imu_collector_) {
+    imu_collector_->stop();
+    imu_collector_.reset();
+    imu_use_native_ = false;
+  }
+#endif
 
   vio_manager_.reset();
   initialized_ = false;
@@ -365,7 +390,7 @@ void VOUnityBridge::convertToUnityCoordinates(const Eigen::Vector3d &p_IinG,
                                                VOPose &out) const {
   // sqrtVINS (OpenVINS convention):
   //   Right-handed, gravity-aligned global frame
-  //   Typically: X-right/east, Y-forward/north, Z-up
+  //   X-right/east, Y-forward/north, Z-up
   //   R_GtoI: rotation from global to IMU body
   //   p_IinG: position of IMU in global frame
   //
@@ -373,53 +398,32 @@ void VOUnityBridge::convertToUnityCoordinates(const Eigen::Vector3d &p_IinG,
   //   Left-handed, Y-up
   //   X-right, Y-up, Z-forward
   //
-  // Conversion from right-handed (X-right, Y-forward, Z-up) to
-  // left-handed (X-right, Y-up, Z-forward):
-  //   Unity_X =  VIO_X
-  //   Unity_Y =  VIO_Z   (Z-up -> Y-up)
-  //   Unity_Z =  VIO_Y   (Y-forward -> Z-forward)
-  //
-  // This is a coordinate permutation, not a simple axis flip.
+  // The key insight: swapping Y<->Z converts between these two systems.
+  // The permutation matrix P = [1 0 0; 0 0 1; 0 1 0] has det=-1,
+  // which naturally handles the handedness flip (right->left).
+  // No additional axis negation is needed.
 
-  // Position conversion
+  // Position conversion: swap Y and Z
   out.px = static_cast<float>(p_IinG.x());   // X -> X
   out.py = static_cast<float>(p_IinG.z());   // Z -> Y (up)
   out.pz = static_cast<float>(p_IinG.y());   // Y -> Z (forward)
 
   // Rotation conversion:
-  // R_GtoI is in VIO coordinates. We need R_UnityG_to_UnityI
-  // Let P be the permutation matrix: P * v_VIO = v_Unity
-  //   P = [1 0 0; 0 0 1; 0 1 0]  (swap Y and Z)
-  // But this has det=-1, so we also need to handle the handedness flip.
-  //
-  // For left-handed system, we negate one axis. Standard approach:
-  // Mirror X: Unity uses left-handed, so flip X.
-  //   v_Unity = [-VIO_X, VIO_Z, VIO_Y]
-  //
-  // Actually, the most robust approach for VIO->Unity:
-  // R_world_to_body in VIO (right-handed) -> R in Unity (left-handed)
-  // We compute R_ItoG = R_GtoI.transpose() (world rotation of body)
-  // Then convert the rotation matrix.
-
+  // We need the body orientation in Unity world frame.
+  // R_ItoG = R_GtoI^T gives the body-to-world rotation in VIO coords.
+  // Then apply the same Y<->Z permutation to both sides:
+  //   R_unity = P * R_ItoG * P^T
+  // where P = [1 0 0; 0 0 1; 0 1 0] (P is symmetric, so P^T = P = P^{-1})
   Eigen::Matrix3d R_ItoG = R_GtoI.transpose();
 
-  // Convert rotation from right-handed to left-handed (Unity) by
-  // negating the X component (mirror X axis):
-  // R_unity = S * R_ItoG * S, where S = diag(-1, 1, 1)
-  // Then swap Y<->Z: apply permutation P = [row swap 1<->2]
-  // Combined: T * R_ItoG * T^(-1) where T handles both mirror and permutation
-  //
-  // T = [-1  0  0]    (negate X, swap Y<->Z)
-  //     [ 0  0  1]
-  //     [ 0  1  0]
-  Eigen::Matrix3d T;
-  T << -1, 0, 0,
-        0, 0, 1,
-        0, 1, 0;
+  Eigen::Matrix3d P;
+  P << 1, 0, 0,
+       0, 0, 1,
+       0, 1, 0;
 
-  Eigen::Matrix3d R_unity = T * R_ItoG * T.transpose();
+  Eigen::Matrix3d R_unity = P * R_ItoG * P;
 
-  // Convert to quaternion
+  // Convert to quaternion (Eigen uses Hamilton convention, same as Unity)
   Eigen::Quaterniond q(R_unity);
   q.normalize();
 
@@ -655,6 +659,96 @@ void VOUnityBridge::onRenderEvent(int eventID) {
   } catch (...) {
     // Silently ignore errors in render thread
   }
+}
+
+// ============================================================================
+// Native IMU Collection
+// ============================================================================
+
+VOErrorCode VOUnityBridge::startNativeImu(int target_hz) {
+#if defined(__ANDROID__) || defined(ANDROID)
+  std::lock_guard<std::mutex> lock(mutex_);
+
+  if (!initialized_ || vio_manager_ == nullptr)
+    return VO_ERROR_NOT_INITIALIZED;
+
+  if (imu_collector_ && imu_collector_->isRunning())
+    return VO_SUCCESS; // Already running
+
+  imu_collector_ = std::make_unique<AndroidImuCollector>();
+
+  // The callback converts Android device-frame IMU to VIO frame and feeds it
+  auto callback = [this](double timestamp, float ax, float ay, float az,
+                         float gx, float gy, float gz) {
+    // Store native sensor timestamp for camera sync
+    native_sensor_ts_.store(timestamp, std::memory_order_relaxed);
+
+    // Android device body frame -> VIO frame (right-handed, Z-up)
+    // Android: X=right, Y=up, Z=out-of-screen
+    // VIO:     X=right, Y=forward, Z=up
+    // Mapping: VIO_x = Dev_x, VIO_y = -Dev_z, VIO_z = Dev_y
+    float ax_vio = ax;
+    float ay_vio = -az;
+    float az_vio = ay;
+    float gx_vio = gx;
+    float gy_vio = -gz;
+    float gz_vio = gy;
+
+    VOImuData imu;
+    imu.timestamp = timestamp;
+    imu.ax = ax_vio;
+    imu.ay = ay_vio;
+    imu.az = az_vio;
+    imu.gx = gx_vio;
+    imu.gy = gy_vio;
+    imu.gz = gz_vio;
+
+    // Feed directly (feedImu acquires its own lock)
+    // We must NOT hold mutex_ here to avoid deadlock
+    // So we release the lock before calling feedImu
+    this->feedImu(imu);
+  };
+
+  if (!imu_collector_->start(callback, target_hz)) {
+    imu_collector_.reset();
+    return VO_ERROR_TRACKING_FAILED;
+  }
+
+  imu_use_native_ = true;
+  PRINT_INFO("[VOBridge] Native IMU started at %d Hz\n", target_hz);
+  return VO_SUCCESS;
+#else
+  (void)target_hz;
+  return VO_ERROR_INVALID_PARAM; // Not supported on non-Android
+#endif
+}
+
+VOErrorCode VOUnityBridge::stopNativeImu() {
+#if defined(__ANDROID__) || defined(ANDROID)
+  std::lock_guard<std::mutex> lock(mutex_);
+
+  if (imu_collector_) {
+    imu_collector_->stop();
+    imu_collector_.reset();
+    imu_use_native_ = false;
+    PRINT_INFO("[VOBridge] Native IMU stopped\n");
+  }
+  return VO_SUCCESS;
+#else
+  return VO_SUCCESS;
+#endif
+}
+
+bool VOUnityBridge::isNativeImuRunning() const {
+#if defined(__ANDROID__) || defined(ANDROID)
+  return imu_collector_ && imu_collector_->isRunning();
+#else
+  return false;
+#endif
+}
+
+double VOUnityBridge::getNativeSensorTimestamp() const {
+  return native_sensor_ts_.load(std::memory_order_relaxed);
 }
 
 // ============================================================================
